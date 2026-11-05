@@ -1,4 +1,4 @@
-var V = 'sake-log-v2';
+var V = 'sake-log-v3';
 var FILES = ['./', 'index.html', 'css/app.css?v=1', 'js/config.js?v=1', 'js/aroma.js?v=1', 'js/data.js?v=1', 'js/api.js?v=1', 'js/bg.js?v=1', 'js/app.js?v=1',
   'vendor/fuse.min.js', 'vendor/browser-image-compression.js', 'data/sakenowa.json', 'icons/icon-180.png', 'manifest.json'];
 
