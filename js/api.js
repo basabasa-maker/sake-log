@@ -22,10 +22,25 @@
   function call(action, payload) {
     if (MOCK) return mock(action, payload).then(done);
     if (!url()) return Promise.reject(new Error('設定でGASのURLを入れてください'));
-    var body = Object.assign({ token: token(), action: action }, payload || {});
-    return fetch(url(), { method: 'POST', body: JSON.stringify(body), redirect: 'follow' })
+    return request(url(), token(), action, payload);
+  }
+  function request(endpoint, passphrase, action, payload) {
+    var body = Object.assign({ token: passphrase, action: action }, payload || {});
+    return fetch(endpoint, { method: 'POST', body: JSON.stringify(body), redirect: 'follow' })
       .then(function (r) { return r.json(); })
-      .then(done);
+      .then(done).then(function (j) { return action === 'list' ? checkedList(j) : j; });
+  }
+  function checkedList(j) {
+    if (!Array.isArray(j.records)) throw new Error('一覧データの形式が違います。GASの公開URLを確認してください');
+    return j;
+  }
+  function checkConnection(endpoint, passphrase) {
+    try {
+      var u = new URL(endpoint);
+      if (u.protocol !== 'https:' || u.hostname !== 'script.google.com' || !/^\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(u.pathname) || u.search || u.hash) throw new Error();
+    } catch (e) { return Promise.reject(new Error('GASのウェブアプリURL（https://script.google.com/macros/s/…/exec）を入力してください')); }
+    if (!passphrase) return Promise.reject(new Error('GASに保存した合言葉を入力してください'));
+    return (MOCK ? mock('list').then(done) : request(endpoint, passphrase, 'list')).then(checkedList);
   }
 
   function done(j) {
@@ -37,7 +52,8 @@
   window.API = {
     mock: MOCK,
     call: call,
+    checkConnection: checkConnection,
     onCost: function (f) { listeners.push(f); },
-    configured: function () { return MOCK || !!url(); }
+    configured: function () { return MOCK || !!(url() && token()); }
   };
 })();
