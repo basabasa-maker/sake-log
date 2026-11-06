@@ -227,7 +227,7 @@
       var k = p[0], v = D.scores[k], has = v != null, g = D.gen[k];
       var d = document.createElement('div');
       d.innerHTML = '<div class="prow"><span class="n">' + p[1] + '</span><div class="rng"><input type="range" min="1" max="10" step="1" value="' + (has ? v : 5) + '" aria-label="' + p[1] + '">' +
-        (g != null ? '<i class="mk" style="left:calc(9px + (100% - 18px) * ' + ((g - 1) / 9) + ' - 1px)"></i>' : '') +
+        (g != null ? '<i class="mk" style="left:calc(var(--range-thumb-size) / 2 + (100% - var(--range-thumb-size)) * ' + ((g - 1) / 9) + ' - 1px)"></i>' : '') +
         '</div><span class="v">' + (has ? v : '—') + '</span><span class="tag"></span></div>';
       var r = $('input', d), vv = $('.v', d), t = $('.tag', d);
       var tag = function () { var s = D.fixed[k] ? '確定' : (D.scores[k] != null ? '推定' : '未'); t.textContent = s; t.className = 'tag' + (s === '確定' ? ' fix' : ''); };
@@ -422,12 +422,17 @@
       '<div class="note">メモを含む取得済み記録と既存の小さな縮小画像を保存します。初期はオフ。最長30日、1一覧1000件・5MB、全体10MBまで。写真原本や合言葉はここには保存しません。保存済みの一覧は先に表示し、5分経過・手動同期・オンライン復帰時に更新します。オフラインは閲覧のみです。Safariの自動消去やプライベートモードでは保持できない場合があります。</div>' +
       '<button id="s-cache-apply" class="sub-btn" type="button">端末保存の設定を適用</button><button id="s-clear-cache" class="sub-btn" type="button">端末保存を解除して消去</button>' +
       '<div id="s-cache-msg" class="note" role="status" aria-live="polite"></div>' +
+      '<button id="s-layout" class="sub-btn" type="button">画面配置を確認（秘密情報なし）</button>' +
       '<div class="note">さけのわデータ更新日: ' + esc(SN.updated || '読み込み前') + '</div></div>');
     function disableCache() {
       var scope = scopeCopy(), generation = modalVersion; cacheSettings.enabled = false; rememberScope(); $('#s-cache').checked = false;
       if (!listFresh) { records = []; listLoaded = false; lastSync = 0; drawList(); }
       clearCache(scope).then(function () { if (generation === modalVersion) $('#s-cache-msg').textContent = 'この接続先の端末保存を解除・消去しました。シートと合言葉は変更していません'; }).catch(function () { if (generation === modalVersion) $('#s-cache-msg').textContent = '端末保存は解除しましたが、消去できませんでした。ブラウザのサイトデータから消去してください'; });
     }
+    $('#s-layout').onclick = function () {
+      if (!window.LayoutMetrics) return;
+      modal('画面配置の確認', '<p class="note">画面の寸法と位置だけを表示します。合言葉や記録内容は含まず、自動送信もしません。</p><pre style="font-size:14px;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;margin-top:12px">' + esc(window.LayoutMetrics.text()) + '</pre>');
+    };
     $('#s-clear-cache').onclick = disableCache;
     $('#s-cache-apply').onclick = function () {
       if (!$('#s-cache').checked) { disableCache(); return; }

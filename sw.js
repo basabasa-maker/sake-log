@@ -1,5 +1,5 @@
-var V = 'sake-log-v6';
-var FILES = ['./', 'index.html', 'css/app.css?v=4', 'js/config.js?v=1', 'js/aroma.js?v=1', 'js/data.js?v=1', 'js/api.js?v=3', 'js/bg.js?v=2', 'js/viewport.js?v=1', 'js/record-cache.js?v=1', 'js/app.js?v=4',
+var V = 'sake-log-v7';
+var FILES = ['./', 'index.html', 'css/app.css?v=5', 'js/config.js?v=1', 'js/aroma.js?v=1', 'js/data.js?v=1', 'js/api.js?v=3', 'js/bg.js?v=2', 'js/viewport.js?v=2', 'js/record-cache.js?v=1', 'js/app.js?v=5',
   'vendor/fuse.min.js', 'vendor/browser-image-compression.js', 'data/sakenowa.json', 'img/bg.jpg', 'icons/icon-180.png', 'manifest.json'];
 
 self.addEventListener('install', function (e) {
