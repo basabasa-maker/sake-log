@@ -15,6 +15,7 @@
   size();
   for (var i = 0; i < 14; i++) ps.push(mk(false));
   window.addEventListener('resize', size);
+  if (typeof ResizeObserver !== 'undefined') new ResizeObserver(size).observe(cv);
   document.addEventListener('visibilitychange', function () { run = !document.hidden; if (run) { last = 0; requestAnimationFrame(tick); } });
 
   var last = 0;
