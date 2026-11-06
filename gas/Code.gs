@@ -107,8 +107,8 @@ function actionEstimate_(b) {
 
 /* ---------- 料金ログ ---------- */
 function ss_() { return SpreadsheetApp.openById(prop_('SHEET_ID')); }
-function costSheet_() {
-  var ss = ss_(), sh = ss.getSheetByName(CFG.COST_SHEET);
+function costSheet_(sheetId) {
+  var ss = sheetId ? SpreadsheetApp.openById(sheetId) : ss_(), sh = ss.getSheetByName(CFG.COST_SHEET);
   if (!sh) { sh = ss.insertSheet(CFG.COST_SHEET); sh.appendRow(['日時', '種別', 'モデル', '入力トークン', '出力トークン', '円']); }
   return sh;
 }
@@ -118,8 +118,8 @@ function logCost_(kind, model, usage) {
   var lock = LockService.getScriptLock(); lock.waitLock(20000);
   try { costSheet_().appendRow([Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm:ss'), kind, model, inT, outT, yen]); } finally { lock.releaseLock(); }
 }
-function monthTotal_() {
-  var sh = costSheet_(), n = sh.getLastRow();
+function monthTotal_(sheetId) {
+  var sh = costSheet_(sheetId), n = sh.getLastRow();
   if (n < 2) return 0;
   var ym = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM'), total = 0;
   sh.getRange(2, 1, n - 1, 6).getValues().forEach(function (r) { if (String(r[0]).indexOf(ym) === 0) total += Number(r[5]) || 0; });
@@ -127,8 +127,8 @@ function monthTotal_() {
 }
 
 /* ---------- 記録シート ---------- */
-function logSheet_() {
-  var sh = ss_().getSheetByName(CFG.SHEET_NAME);
+function logSheet_(sheetId) {
+  var ss = sheetId ? SpreadsheetApp.openById(sheetId) : ss_(), sh = ss.getSheetByName(CFG.SHEET_NAME);
   if (!sh) throw new Error('シート「' + CFG.SHEET_NAME + '」がありません');
   return sh;
 }
@@ -143,19 +143,105 @@ function ensureCol_(sh, headers, name) {
   return headers.length - 1;
 }
 
-function saveBlob_(b64, name) {
-  var folders = DriveApp.getFoldersByName(CFG.PHOTO_FOLDER), folder = folders.hasNext() ? folders.next() : DriveApp.createFolder(CFG.PHOTO_FOLDER);
-  var blob = Utilities.newBlob(Utilities.base64Decode(b64), 'image/jpeg', name);
-  var f = folder.createFile(blob);
-  return 'https://drive.google.com/file/d/' + f.getId() + '/view?usp=drivesdk';
+function saveBlob_(b64, name, sheetId) {
+  if (typeof Drive === 'undefined' || !Drive.Files) throw new Error('写真保存には Advanced Drive v3 の設定が必要です');
+  sheetId = String(sheetId || prop_('SHEET_ID') || '');
+  if (!/^[A-Za-z0-9_-]+$/.test(sheetId)) throw new Error('写真保存先の SHEET_ID を確認してください');
+  var blob;
+  try { blob = Utilities.newBlob(Utilities.base64Decode(b64), 'image/jpeg', name); }
+  catch (err) { throw new Error('写真データを読み取れませんでした。写真を選び直してください'); }
+  // actionSave_ holds the script lock throughout folder lookup and photo creation.
+  var folderId = photoFolder_(sheetId), file;
+  try {
+    file = Drive.Files.create({ name: name, mimeType: 'image/jpeg', parents: [folderId] }, blob, { fields: 'id' });
+    if (!file || !file.id) throw new Error('Missing file ID');
+  } catch (err) {
+    // A timeout may happen after Drive has accepted the upload. Do not retry it here.
+    throw new Error('写真の保存結果を確認できませんでした。重複を避けるため、Drive の写真を確認してから保存し直してください');
+  }
+  return 'https://drive.google.com/file/d/' + file.id + '/view?usp=drivesdk';
+}
+
+function checkedPhotoFolder_(folder, sheetId) {
+  var tags = folder && folder.appProperties || {};
+  if (!folder || !folder.id || folder.trashed || folder.mimeType !== 'application/vnd.google-apps.folder' ||
+      tags.sakeLog !== 'photos-v1' || tags.sheetId !== sheetId ||
+      !folder.capabilities || folder.capabilities.canAddChildren !== true) {
+    throw new Error('写真保存先のフォルダが無効です。フォルダと PHOTO_FOLDER_ID_ 設定を確認してください');
+  }
+  return folder;
+}
+
+function photoFolder_(sheetId) {
+  var props = PropertiesService.getScriptProperties(), key = 'PHOTO_FOLDER_ID_' + sheetId;
+  var id = props.getProperty(key), folder;
+  var fields = 'id,mimeType,trashed,appProperties,capabilities(canAddChildren)';
+  if (id) {
+    try { folder = Drive.Files.get(id, { fields: fields }); }
+    catch (err) { throw new Error('写真保存先を確認できません。削除や権限変更がないか、フォルダと PHOTO_FOLDER_ID_ 設定を確認してください'); }
+    // Invalid/inaccessible stored IDs are not silently replaced with another folder.
+    return checkedPhotoFolder_(folder, sheetId).id;
+  }
+
+  var found;
+  try {
+    found = Drive.Files.list({
+      q: "trashed = false and mimeType = 'application/vnd.google-apps.folder' and " +
+        "appProperties has { key = 'sakeLog' and value = 'photos-v1' } and " +
+        "appProperties has { key = 'sheetId' and value = '" + sheetId + "' }",
+      pageSize: 2, fields: 'files(' + fields + '),nextPageToken,incompleteSearch'
+    });
+  } catch (err) { throw new Error('写真保存先の検索に失敗しました。Drive v3 の設定とアクセス権を確認してください'); }
+  var folders = found && found.files || [];
+  if (!found || found.incompleteSearch || found.nextPageToken || folders.length > 1) {
+    throw new Error('写真保存先を一意に確認できません。フォルダを確認してください');
+  }
+  if (folders.length) {
+    folder = checkedPhotoFolder_(folders[0], sheetId);
+  } else {
+    var created;
+    try {
+      created = Drive.Files.create({
+        name: CFG.PHOTO_FOLDER + '-' + sheetId.slice(-8), mimeType: 'application/vnd.google-apps.folder',
+        appProperties: { sakeLog: 'photos-v1', sheetId: sheetId }
+      });
+      if (!created || !created.id) throw new Error('Missing folder ID');
+    } catch (err) { throw new Error('写真フォルダの作成結果を確認できません。Drive を確認してください'); }
+    try { folder = Drive.Files.get(created.id, { fields: fields }); }
+    catch (err) { throw new Error('作成した写真フォルダを確認できません。Drive を確認してください'); }
+    folder = checkedPhotoFolder_(folder, sheetId);
+  }
+  // Recover marked app-created folders if an earlier create succeeded but ID storage failed.
+  try { props.setProperty(key, folder.id); }
+  catch (err) { throw new Error('写真保存先IDの記録に失敗しました。写真はまだ保存していません'); }
+  return folder.id;
+}
+
+function recordVersion_(headers, values) {
+  var normalized = values.map(function (v) { return v instanceof Date ? v.getTime() : v; });
+  return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, JSON.stringify([headers, normalized]), Utilities.Charset.UTF_8)
+    .map(function (v) { return ('0' + (v & 255).toString(16)).slice(-2); }).join('');
 }
 
 function actionSave_(b) {
   var rec = b.record || {}, photos = b.photos || {};
+  var sourceSheetId = String(prop_('SHEET_ID') || '');
+  if (rec.sourceSheetId && String(rec.sourceSheetId) !== sourceSheetId) throw new Error('接続先が変わりました。一覧から記録を選び直してください');
   var lock = LockService.getScriptLock(); lock.waitLock(30000);
   try {
-    var sh = logSheet_(), headers = headers_(sh);
-    var isNew = !rec.row, recordId = rec.recordId || Utilities.getUuid();
+    var sh = logSheet_(sourceSheetId), headers = headers_(sh);
+    var isNew = rec.row === undefined || rec.row === null || rec.row === '';
+    var recordId = rec.recordId === undefined || rec.recordId === null || rec.recordId === '' ? Utilities.getUuid() : rec.recordId;
+    var row;
+    if (!isNew) {
+      row = Number(rec.row);
+      if (!isFinite(row) || Math.floor(row) !== row || row < 2 || row > sh.getLastRow()) throw new Error('対象の行が見つかりません');
+      if (!rec.sourceSheetId || !rec.sourceVersion) throw new Error('一覧を開き直してから保存してください');
+      var current = sh.getRange(row, 1, 1, headers.length).getValues()[0];
+      if (rec.sourceVersion !== recordVersion_(headers, current)) throw new Error('記録が更新または移動されました。一覧を開き直してください');
+      var idCol = headers.indexOf('記録ID'), currentId = idCol >= 0 ? String(current[idCol] == null ? '' : current[idCol]) : '';
+      if (currentId && String(rec.recordId) !== currentId) throw new Error('対象の記録が変わりました。一覧を開き直してください');
+    }
     var vals = {};
     Object.keys(KEYMAP).forEach(function (k) { if (rec[k] !== undefined && rec[k] !== null && ['recordId', 'updatedAt', 'fixedJson', 'estimatesJson', 'bottleUrl', 'labelUrl'].indexOf(k) < 0) vals[KEYMAP[k]] = rec[k]; });
     Object.keys(SCORE).forEach(function (k) { var v = (rec.scores || {})[k]; if (v !== undefined && v !== null && v !== '') vals[SCORE[k]] = Number(v); });
@@ -165,36 +251,31 @@ function actionSave_(b) {
     vals['推定値JSON'] = JSON.stringify(rec.estimates || {});
     vals['更新日時'] = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm:ss');
     var stamp = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyyMMdd-HHmmss');
-    if (photos.bottle) vals['写真URL'] = saveBlob_(photos.bottle, 'bottle-' + stamp + '.jpg');
-    if (photos.label) vals['ラベル写真URL'] = saveBlob_(photos.label, 'label-' + stamp + '.jpg');
+    if (photos.bottle) vals['写真URL'] = saveBlob_(photos.bottle, 'bottle-' + stamp + '.jpg', sourceSheetId);
+    if (photos.label) vals['ラベル写真URL'] = saveBlob_(photos.label, 'label-' + stamp + '.jpg', sourceSheetId);
 
     Object.keys(vals).forEach(function (n) { ensureCol_(sh, headers, n); });
-    var row;
     if (isNew) {
       row = sh.getLastRow() + 1;
-    } else {
-      row = Number(rec.row);
-      if (row < 2 || row > sh.getLastRow()) throw new Error('対象の行が見つかりません');
-      var idCol = headers.indexOf('記録ID');
-      if (idCol >= 0) { var cur = String(sh.getRange(row, idCol + 1).getValue() || ''); if (cur && rec.recordId && cur !== rec.recordId) throw new Error('行がずれています。一覧を開き直してください'); }
     }
     // 変えた項目(送られてきた列)だけ書く。他の列は触らない。
     Object.keys(vals).forEach(function (n) {
       var v = vals[n];
       sh.getRange(row, headers.indexOf(n) + 1).setValue(v);
     });
-    return { ok: true, row: row, recordId: recordId, costTotalYen: monthTotal_() };
+    var savedVersion = recordVersion_(headers, sh.getRange(row, 1, 1, headers.length).getValues()[0]);
+    return { ok: true, row: row, recordId: recordId, sourceSheetId: sourceSheetId, sourceVersion: savedVersion, costTotalYen: monthTotal_(sourceSheetId) };
   } finally { lock.releaseLock(); }
 }
 
 function actionList_() {
-  var sh = logSheet_(), n = sh.getLastRow();
-  if (n < 2) return { ok: true, records: [] };
+  var sourceSheetId = String(prop_('SHEET_ID') || ''), sh = logSheet_(sourceSheetId), n = sh.getLastRow();
+  if (n < 2) return { ok: true, sourceSheetId: sourceSheetId, records: [] };
   var headers = headers_(sh), data = sh.getRange(2, 1, n - 1, headers.length).getValues(), rev = {}, scRev = {};
   Object.keys(KEYMAP).forEach(function (k) { rev[KEYMAP[k]] = k; });
   Object.keys(SCORE).forEach(function (k) { scRev[SCORE[k]] = k; });
   var records = data.map(function (r, idx) {
-    var o = { row: idx + 2, scores: {} };
+    var o = { row: idx + 2, scores: {}, sourceSheetId: sourceSheetId, sourceVersion: recordVersion_(headers, r) };
     headers.forEach(function (h, c) {
       var v = r[c];
       if (v === '' || v === null) return;
@@ -202,12 +283,12 @@ function actionList_() {
       if (scRev[h]) o.scores[scRev[h]] = v;
       else if (rev[h]) o[rev[h]] = v;
     });
-    if (!o.brand) return null;
-    o.recordId = o.recordId || ('r' + o.row);
+    if (!String(o.brand == null ? '' : o.brand).trim()) return null;
+    if (o.recordId === undefined || o.recordId === null || o.recordId === '') o.recordId = 'r' + o.row;
     try { o.fixed = o.fixedJson ? JSON.parse(o.fixedJson) : []; } catch (e) { o.fixed = []; }
     try { o.estimates = o.estimatesJson ? JSON.parse(o.estimatesJson) : {}; } catch (e) { o.estimates = {}; }
     delete o.fixedJson; delete o.estimatesJson;
     return o;
   }).filter(Boolean);
-  return { ok: true, records: records };
+  return { ok: true, sourceSheetId: sourceSheetId, records: records };
 }

@@ -14,10 +14,12 @@
   var D = newDraft();
   var view = 'reg';
   var records = [];
+  var listRequest = 0;
+  var savePending = false;
   var openCat = null;
 
   function newDraft() {
-    return { started: false, row: null, recordId: '', date: today(), place: '', memo: '', brand: '', brewery: '', area: '', grade: '', method: '', rice: '', polish: '',
+    return { started: false, row: null, recordId: '', sourceSheetId: '', sourceVersion: '', date: today(), place: '', memo: '', brand: '', brewery: '', area: '', grade: '', method: '', rice: '', polish: '',
       brandId: null, scores: {}, gen: {}, fixed: {}, aroma: { sel: [], ai: [], custom: [] }, ssi4: '', color: '', clarity: '', viscosity: '', rating: '',
       photos: { bottle: null, label: null }, thumb: '', bottleUrl: '', labelUrl: '', chart: null, scale: 10 };
   }
@@ -144,6 +146,9 @@
     $('#r-match').textContent = m;
     var th = $('.head .thumb'), src = (D.photos.bottle && D.photos.bottle.url) || D.thumb || '';
     th.classList.toggle('has', !!src); $('img', th).src = src;
+    $('#r-photos').innerHTML = [['瓶の写真を開く', D.bottleUrl], ['ラベル写真を開く', D.labelUrl]].filter(function (p) {
+      return /^https?:\/\//i.test(p[1] || '');
+    }).map(function (p) { return '<a href="' + esc(p[1]) + '" target="_blank" rel="noopener noreferrer">' + p[0] + '</a>'; }).join(' ／ ');
   }
   var BASIC = [['date', '日付', 'date'], ['brand', '銘柄名'], ['brewery', '蔵元'], ['area', '産地'], ['grade', '特定名称'], ['method', '製法'], ['rice', '使用米'], ['polish', '精米歩合'], ['place', '飲んだ場所']];
   function renderBasic() {
@@ -227,28 +232,32 @@
 
   /* ---------- 保存 ---------- */
   $('#btn-save').onclick = function () {
+    if (savePending) return;
     if (!D.brand) { $('#save-msg').textContent = '銘柄名を入れてください'; return; }
     if (!API.configured()) { $('#save-msg').textContent = '設定でGASのURLと合言葉を入れてください'; return; }
     var A = D.aroma, types = Object.keys(AROMA).filter(function (c) { return cnt(c) > 0; });
-    var rec = { row: D.row, recordId: D.recordId, date: D.date, brand: D.brand, brewery: D.brewery, area: D.area, grade: D.grade, method: D.method, rice: D.rice, polish: D.polish, place: D.place,
+    var rec = { row: D.row, recordId: D.recordId, sourceSheetId: D.sourceSheetId, sourceVersion: D.sourceVersion, date: D.date, brand: D.brand, brewery: D.brewery, area: D.area, grade: D.grade, method: D.method, rice: D.rice, polish: D.polish, place: D.place,
       color: D.color, clarity: D.clarity, viscosity: D.viscosity, ssi4: D.ssi4, rating: D.rating, memo: D.memo, brandId: D.brandId || '',
       scores: D.scores, fixed: Object.keys(D.fixed).filter(function (k) { return D.fixed[k]; }), estimates: D.gen,
       aromaType: types.join('、'), aromaDetail: A.sel.join('、'), scale: 10 };
     var photos = {};
     if (D.photos.bottle) { photos.bottle = D.photos.bottle.b64; rec.thumb = D.thumb; }
     if (D.photos.label) photos.label = D.photos.label.b64;
+    var draft = D;
+    savePending = true;
     busy('保存中…'); $('#save-msg').textContent = '';
     API.call('save', { record: rec, photos: photos }).then(function (r) {
-      D.row = r.row; D.recordId = r.recordId; busy();
-      $('#save-msg').textContent = '保存しました';
-    }).catch(function (e) { busy(); $('#save-msg').textContent = '保存できませんでした: ' + e.message; });
+      draft.row = r.row; draft.recordId = r.recordId; savePending = false; busy();
+      draft.sourceSheetId = r.sourceSheetId || ''; draft.sourceVersion = r.sourceVersion || '';
+      if (D === draft) $('#save-msg').textContent = '保存しました';
+    }).catch(function (e) { savePending = false; busy(); if (D === draft) $('#save-msg').textContent = '保存できませんでした: ' + e.message; });
   };
 
   /* ---------- 一覧 ---------- */
   var OLD = { 1: 2, 2: 5, 3: 8 }, OLDF = { '短い': 3, 'やや短い': 4, '中程度': 5, 'やや長い': 6, '長い': 9 };
   function fromServer(r) {
     var d = newDraft(); d.started = true;
-    ['row', 'recordId', 'date', 'place', 'memo', 'brand', 'brewery', 'area', 'grade', 'method', 'rice', 'polish', 'ssi4', 'color', 'clarity', 'viscosity', 'rating', 'thumb', 'bottleUrl', 'labelUrl'].forEach(function (k) { if (r[k] != null) d[k] = r[k]; });
+    ['row', 'recordId', 'sourceSheetId', 'sourceVersion', 'date', 'place', 'memo', 'brand', 'brewery', 'area', 'grade', 'method', 'rice', 'polish', 'ssi4', 'color', 'clarity', 'viscosity', 'rating', 'thumb', 'bottleUrl', 'labelUrl'].forEach(function (k) { if (r[k] != null) d[k] = r[k]; });
     d.brandId = r.brandId ? +r.brandId : null; d.scale = r.scale || 3;
     var old = +d.scale !== 10, sc = r.scores || {};
     PARAMS.forEach(function (p) {
@@ -263,11 +272,12 @@
     return d;
   }
   function loadList() {
-    var cached = null; try { cached = JSON.parse(localStorage.getItem('sl_list') || 'null'); } catch (e) {}
-    if (cached) { records = cached; drawList(); }
+    var request = ++listRequest;
+    // Old sl_list caches have no trustworthy source identity. Leave them untouched.
     if (!API.configured()) { $('#l-count').textContent = '設定でGASのURLと合言葉を入れてください'; return; }
-    API.call('list').then(function (r) { records = r.records || []; try { localStorage.setItem('sl_list', JSON.stringify(records)); } catch (e) {} drawList(); })
-      .catch(function (e) { $('#l-count').textContent = '一覧を取得できませんでした: ' + e.message; });
+    $('#l-count').textContent = '記録を取得中…';
+    API.call('list').then(function (r) { if (request !== listRequest) return; records = r.records || []; drawList(); })
+      .catch(function (e) { if (request === listRequest) $('#l-count').textContent = '一覧を取得できませんでした: ' + e.message; });
   }
   function drawList() {
     var q = SN.norm($('#q').value), items = records.slice().sort(function (a, b) { return String(b.date).localeCompare(String(a.date)) || b.row - a.row; })
@@ -298,14 +308,16 @@
       '<div class="note">さけのわデータ更新日: ' + esc(SN.updated || '読み込み前') + '</div></div>');
     $('#s-save').onclick = function () {
       localStorage.setItem(CONFIG.URL_KEY, $('#s-url').value.trim()); localStorage.setItem(CONFIG.TOKEN_KEY, $('#s-tok').value.trim());
+      listRequest++; records = []; drawList();
       $('#modal').hidden = true; loadCost();
+      if (view === 'list') loadList();
     };
   };
 
   /* ---------- iPhone対策: 入力後のずれを戻す ---------- */
   document.addEventListener('focusout', function () { setTimeout(function () { window.scrollTo(0, 0); document.body.scrollTop = 0; document.documentElement.scrollTop = 0; }, 80); });
   document.addEventListener('gesturestart', function (e) { e.preventDefault(); });
-  document.addEventListener('visibilitychange', function () { if (!document.hidden) loadCost(); });
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) { loadCost(); if (view === 'list') loadList(); } });
 
   /* ---------- 起動 ---------- */
   if ('serviceWorker' in navigator && !API.mock) navigator.serviceWorker.register('sw.js').catch(function () {});
