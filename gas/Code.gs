@@ -47,7 +47,7 @@ function doPost(e) {
       default: return out_({ ok: false, error: '不明な操作: ' + b.action });
     }
   } catch (err) {
-    return out_({ ok: false, error: String(err && err.message || err) });
+    return out_({ ok: false, error: String(err && err.message || err), code: err && err.code || (b && b.action === 'save' ? 'SAVE_REJECTED' : '') });
   }
 }
 
@@ -89,17 +89,15 @@ function actionRead_(b) {
 }
 
 function actionEstimate_(b) {
-  var i = b.info || {}, axes = ['華やか', '芳醇', '重厚', '穏やか', 'ドライ', '軽快'];
-  var chart = i.chart ? axes.map(function (a, k) { return a + ' ' + i.chart[k] + '/10'; }).join('、') : 'なし';
+  var i = b.info || {};
   var text = '次の日本酒について、利き酒師の評価項目を1〜10の整数で推定し、JSONだけを返してください。5が一般的な中間です。\n' +
     '銘柄: ' + (i.brand || '不明') + ' / 蔵元: ' + (i.brewery || '不明') + ' / 特定名称: ' + (i.grade || '不明') + ' / 製法: ' + (i.method || '不明') + ' / 使用米: ' + (i.rice || '不明') + ' / 精米歩合: ' + (i.polish || '不明') + '\n' +
-    'さけのわのフレーバーチャート(みんなの評価を10段階の位置にしたもの): ' + chart + '\n' +
     '根拠が弱い項目は5に寄せてください。\n' +
     '{"scores":{"aroma":香り強さ,"attack":アタック,"sweet":甘味,"acid":酸味,"bitter":苦味,"umami":うま味,"body":ボディ,"finish":余韻},"aroma":["香り候補を最大5個。次の語彙から選ぶ"],"ssi4":"薫酒|爽酒|醇酒|熟酒のいずれか"}\n' +
     '語彙: ' + AROMA_VOCAB.join('、');
   var r = claude_(CFG.MODEL_EST, 'あなたは唎酒師の資格を持つ日本酒の専門家です。JSONのみを返します。', [{ type: 'text', text: text }], 1500, 'estimate');
   var sc = {};
-  Object.keys(SCORE).forEach(function (k) { var v = Math.round(Number((r.scores || {})[k])); sc[k] = isNaN(v) ? 5 : Math.max(1, Math.min(10, v)); });
+  Object.keys(SCORE).forEach(function (k) { var v = tenScore_((r.scores || {})[k]); if (v !== null) sc[k] = v; });
   var aroma = (r.aroma || []).filter(function (x) { return AROMA_VOCAB.indexOf(x) >= 0; }).slice(0, 5);
   var ssi = ['薫酒', '爽酒', '醇酒', '熟酒'].indexOf(r.ssi4) >= 0 ? r.ssi4 : '';
   return { ok: true, scores: sc, aroma: aroma, ssi4: ssi, costTotalYen: monthTotal_() };
@@ -122,7 +120,10 @@ function monthTotal_(sheetId) {
   var sh = costSheet_(sheetId), n = sh.getLastRow();
   if (n < 2) return 0;
   var ym = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM'), total = 0;
-  sh.getRange(2, 1, n - 1, 6).getValues().forEach(function (r) { var d = r[0] instanceof Date ? Utilities.formatDate(r[0], 'Asia/Tokyo', 'yyyy-MM') : String(r[0]); if (d.indexOf(ym) === 0) total += Number(r[5]) || 0; });
+  sh.getRange(2, 1, n - 1, 6).getValues().forEach(function (r) {
+    var d = r[0] instanceof Date ? Utilities.formatDate(r[0], 'Asia/Tokyo', 'yyyy-MM') : String(r[0]);
+    if (d.indexOf(ym) === 0) total += Number(r[5]) || 0;
+  });
   return total;
 }
 
@@ -157,7 +158,7 @@ function saveBlob_(b64, name, sheetId) {
     if (!file || !file.id) throw new Error('Missing file ID');
   } catch (err) {
     // A timeout may happen after Drive has accepted the upload. Do not retry it here.
-    throw new Error('写真の保存結果を確認できませんでした。重複を避けるため、Drive の写真を確認してから保存し直してください');
+    throw saveError_('PHOTO_UNKNOWN', '写真の保存結果を確認できません。再送せず、Driveと保存待機情報を管理者に確認してください');
   }
   return 'https://drive.google.com/file/d/' + file.id + '/view?usp=drivesdk';
 }
@@ -217,10 +218,85 @@ function photoFolder_(sheetId) {
   return folder.id;
 }
 
-function recordVersion_(headers, values) {
-  var normalized = values.map(function (v) { return v instanceof Date ? v.getTime() : v; });
-  return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, JSON.stringify([headers, normalized]), Utilities.Charset.UTF_8)
+function saveError_(code, message) { var e = new Error(message); e.code = code; return e; }
+function digest_(value) {
+  return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, JSON.stringify(value), Utilities.Charset.UTF_8)
     .map(function (v) { return ('0' + (v & 255).toString(16)).slice(-2); }).join('');
+}
+function sorted_(v) {
+  if (Array.isArray(v)) return v.map(sorted_);
+  if (v && typeof v === 'object') { var o = {}; Object.keys(v).sort().forEach(function (k) { o[k] = sorted_(v[k]); }); return o; }
+  return v;
+}
+function recordVersion_(headers, values, formulas) {
+  var normalized = headers.map(function (h, i) {
+    var v = values[i] == null ? '' : values[i];
+    if (formulas && formulas[i]) return { formula: formulas[i] };
+    if (h === '保存操作JSON' && v) { try { var receipt = JSON.parse(v); delete receipt.resultVersion; return sorted_(receipt); } catch (e) {} }
+    return v instanceof Date ? v.getTime() : v;
+  });
+  return digest_([headers, normalized]);
+}
+function sheetApi_(sheetId, suffix, method, payload) {
+  var response = UrlFetchApp.fetch('https://sheets.googleapis.com/v4/spreadsheets/' + encodeURIComponent(sheetId) + suffix, {
+    method: method || 'get', contentType: 'application/json', muteHttpExceptions: true,
+    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+    payload: payload ? JSON.stringify(payload) : undefined
+  });
+  var code = response.getResponseCode();
+  // A definite 4xx rejection is not applied. Timeouts/5xx remain uncertain.
+  if (code < 200 || code >= 300) throw saveError_(code >= 400 && code < 500 && code !== 408 && code !== 429 ? 'SAVE_REJECTED' : 'SAVE_UNKNOWN', 'Sheets APIで保存を確認できません (' + code + ')');
+  return JSON.parse(response.getContentText());
+}
+function colName_(n) { var s = ''; for (; n; n = Math.floor((n - 1) / 26)) s = String.fromCharCode(65 + (n - 1) % 26) + s; return s; }
+function entered_(v) {
+  if (v === '' || v === null || v === undefined) return {};
+  if (typeof v === 'number') { if (!isFinite(v)) throw new Error('保存値に無効な数値があります'); return { numberValue: v }; }
+  if (typeof v === 'boolean') return { boolValue: v };
+  return { stringValue: String(v) }; // Literal '=...' remains text, never a formula.
+}
+function freshRow_(sheetId, sh, width, row) {
+  var title = "'" + sh.getName().replace(/'/g, "''") + "'!A";
+  var j = sheetApi_(sheetId, '?includeGridData=true&ranges=' + encodeURIComponent(title + '1:' + colName_(width) + '1') + '&ranges=' + encodeURIComponent(title + row + ':' + colName_(width) + row) + '&fields=sheets(properties(sheetId),data(startRow,startColumn,rowData(values(userEnteredValue))))');
+  var result = {};
+  (j.sheets || []).filter(function (x) { return x.properties.sheetId === sh.getSheetId(); }).forEach(function (x) {
+    (x.data || []).forEach(function (block) { (block.rowData || []).forEach(function (r, dy) { result[(block.startRow || 0) + dy + 1] = (r.values || []).map(function (c) { return c.userEnteredValue || {}; }); }); });
+  });
+  return { headers: result[1] || [], row: result[row] || [] };
+}
+function verifySave_(sheetId, sh, journal) {
+  var fresh = freshRow_(sheetId, sh, journal.width, journal.row), receipt;
+  try { receipt = JSON.parse((fresh.row[journal.receiptCol] || {}).stringValue || ''); } catch (e) { return null; }
+  if (receipt.id !== journal.id || receipt.digest !== journal.digest || receipt.resultVersion !== journal.resultVersion) return null;
+  var actual = journal.columns.map(function (col) { return [col, fresh.headers[col] || {}, fresh.row[col] || {}]; });
+  if (digest_(actual) !== journal.changesDigest) return null;
+  var values = fresh.row;
+  function text(name) { var col = fresh.headers.findIndex(function (c) { return c.stringValue === name; }); return col < 0 ? '' : (values[col] || {}).stringValue || ''; }
+  return { ok: true, row: journal.row, recordId: journal.recordId, sourceSheetId: sheetId, sourceVersion: journal.resultVersion, bottleUrl: text('写真URL'), labelUrl: text('ラベル写真URL') };
+}
+function finishSave_(props, pendingKey, doneKey, journal, result) {
+  // Persist the acknowledgement before releasing the barrier. No record/photo/token values.
+  props.setProperty(doneKey, JSON.stringify(journal));
+  props.deleteProperty(pendingKey);
+  return result;
+}
+function saveKeys_(sheetId, id) { var prefix = 'SAKE_SAVE_V1_' + digest_(sheetId).slice(0, 20) + '_'; return { pending: prefix + 'PENDING', done: prefix + 'DONE_' + digest_(id) }; }
+function reconcileSave_(props, keys, journal, sheetId, sh) {
+  var result;
+  try { result = journal.phase === 'batch' ? verifySave_(sheetId, sh, journal) : null; } catch (e) { result = null; }
+  if (!result) throw saveError_('SAVE_UNKNOWN', '前の保存結果が未確定です。再送は停止しています。管理者が保存操作JSONと待機情報を確認してください');
+  try { return finishSave_(props, keys.pending, saveKeys_(sheetId, journal.id).done, journal, result); }
+  catch (e) { throw saveError_('SAVE_UNKNOWN', '記録は反映済みの可能性があります。確認情報の記録が完了するまで再送しません'); }
+}
+
+function pruneSaveReceipts_(props) {
+  var now = Date.now(), count = 0;
+  props.getKeys().filter(function (k) { return /^SAKE_SAVE_V1_[a-f0-9]{20}_DONE_[a-f0-9]{64}$/.test(k); }).forEach(function (k) {
+    var value; try { value = JSON.parse(props.getProperty(k)); } catch (e) { throw new Error('保存確認情報が壊れています。管理者に確認してください'); }
+    if (!value || !isFinite(value.createdAt)) throw new Error('保存確認情報を確認できません');
+    if (now - value.createdAt > 7 * 86400000) props.deleteProperty(k); else count++;
+  });
+  if (count >= 200) throw new Error('保存確認情報の安全上限（7日間200件）です。管理者に確認してください');
 }
 
 function actionSave_(b) {
@@ -230,6 +306,23 @@ function actionSave_(b) {
   var lock = LockService.getScriptLock(); lock.waitLock(30000);
   try {
     var sh = logSheet_(sourceSheetId), headers = headers_(sh);
+    var op = String(rec.saveOperationId || ''), stampMs = parseInt(op.split('-')[1], 36);
+    if (!/^op-[a-z0-9]+-[A-Za-z0-9_-]{20,100}$/.test(op) || !isFinite(stampMs) || Math.abs(Date.now() - stampMs) > 7 * 86400000) throw new Error('更新版アプリで保存してください（保存操作IDの期限は7日です）');
+    var payloadDigest = digest_(sorted_({ record: rec, photos: photos })), keys = saveKeys_(sourceSheetId, op), props = PropertiesService.getScriptProperties();
+    var pending = props.getProperty(keys.pending), done = props.getProperty(keys.done);
+    if (pending) {
+      var previous = JSON.parse(pending), recovered = reconcileSave_(props, keys, previous, sourceSheetId, sh);
+      if (previous.id === op) { if (previous.digest !== payloadDigest) throw new Error('同じ保存操作の内容が変わっています'); return recovered; }
+      throw saveError_('SAVE_REJECTED', '前の保存は確認できました。今回の別操作は実行していません。一覧を同期して重複がないか確認してください');
+    }
+    if (done) {
+      var applied = JSON.parse(done);
+      if (applied.digest !== payloadDigest) throw new Error('同じ保存操作の内容が変わっています');
+      var replay = verifySave_(sourceSheetId, sh, applied);
+      if (!replay) throw new Error('保存後に記録が変わりました。一覧から開き直してください');
+      return replay;
+    }
+    pruneSaveReceipts_(props);
     var isNew = rec.row === undefined || rec.row === null || rec.row === '';
     var recordId = rec.recordId === undefined || rec.recordId === null || rec.recordId === '' ? Utilities.getUuid() : rec.recordId;
     var row;
@@ -237,45 +330,87 @@ function actionSave_(b) {
       row = Number(rec.row);
       if (!isFinite(row) || Math.floor(row) !== row || row < 2 || row > sh.getLastRow()) throw new Error('対象の行が見つかりません');
       if (!rec.sourceSheetId || !rec.sourceVersion) throw new Error('一覧を開き直してから保存してください');
-      var current = sh.getRange(row, 1, 1, headers.length).getValues()[0];
-      if (rec.sourceVersion !== recordVersion_(headers, current)) throw new Error('記録が更新または移動されました。一覧を開き直してください');
+      var current = sh.getRange(row, 1, 1, headers.length).getValues()[0], formulas = sh.getRange(row, 1, 1, headers.length).getFormulas()[0];
+      if (rec.sourceVersion !== recordVersion_(headers, current, formulas)) throw new Error('記録が更新または移動されました。一覧を開き直してください');
       var idCol = headers.indexOf('記録ID'), currentId = idCol >= 0 ? String(current[idCol] == null ? '' : current[idCol]) : '';
       if (currentId && String(rec.recordId) !== currentId) throw new Error('対象の記録が変わりました。一覧を開き直してください');
     }
+    // Validate the score protocol before photos, columns, or cells can be changed.
+    if (!isNew && rec.scoreMode !== 'preserve-v1') throw new Error('評価を保持する更新版アプリで一覧を開き直してから保存してください');
+    var scoreEdits = validatedScoreEdits_(rec, isNew);
+    var scoreMeta = {};
+    var metaCol = headers.indexOf('評価尺度JSON');
+    if (!isNew && Object.keys(scoreEdits).length && metaCol >= 0 && current[metaCol]) {
+      try { scoreMeta = JSON.parse(current[metaCol]); } catch (e) { throw new Error('評価尺度の補助情報を確認できません。記録を変更せず管理者に確認してください'); }
+      if (!scoreMeta || typeof scoreMeta !== 'object' || Array.isArray(scoreMeta)) throw new Error('評価尺度の補助情報が無効です');
+    }
     var vals = {};
-    Object.keys(KEYMAP).forEach(function (k) { if (rec[k] !== undefined && rec[k] !== null && ['recordId', 'updatedAt', 'fixedJson', 'estimatesJson', 'bottleUrl', 'labelUrl'].indexOf(k) < 0) vals[KEYMAP[k]] = rec[k]; });
-    Object.keys(SCORE).forEach(function (k) { var v = (rec.scores || {})[k]; if (v !== undefined && v !== null && v !== '') vals[SCORE[k]] = Number(v); });
-    if (rec.scores) vals['評価尺度'] = 10;
+    Object.keys(KEYMAP).forEach(function (k) { if (rec[k] !== undefined && rec[k] !== null && ['recordId', 'updatedAt', 'fixedJson', 'estimatesJson', 'bottleUrl', 'labelUrl', 'scale'].indexOf(k) < 0) vals[KEYMAP[k]] = rec[k]; });
+    Object.keys(scoreEdits).forEach(function (k) {
+      var edit = scoreEdits[k], col = headers.indexOf(SCORE[k]);
+      var previous = !isNew && col >= 0 ? current[col] : null, previousMeta = scoreMeta[k];
+      var scaleCol = headers.indexOf('評価尺度');
+      scoreMeta[k] = { scale: 10, origin: edit.origin };
+      if (!isNew) scoreMeta[k].previous = { value: previous, scale: previousMeta && previousMeta.scale === 10 ? 10 : scaleCol >= 0 ? current[scaleCol] : null };
+      if (!isNew) scoreMeta[k].original = previousMeta && previousMeta.original || scoreMeta[k].previous;
+      vals[SCORE[k]] = edit.value;
+    });
+    if (Object.keys(scoreEdits).length) vals['評価尺度JSON'] = JSON.stringify(scoreMeta);
+    // Existing row-wide scale stays unchanged; explicit edits carry per-axis scale.
+    if (isNew) vals['評価尺度'] = 10;
     vals['記録ID'] = recordId;
     if (rec.fixed !== undefined) vals['確定項目'] = JSON.stringify(rec.fixed || []);
     if (rec.estimates !== undefined) vals['推定値JSON'] = JSON.stringify(rec.estimates || {});
     vals['更新日時'] = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm:ss');
-    var stamp = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyyMMdd-HHmmss');
-    if (photos.bottle) vals['写真URL'] = saveBlob_(photos.bottle, 'bottle-' + stamp + '.jpg', sourceSheetId);
-    if (photos.label) vals['ラベル写真URL'] = saveBlob_(photos.label, 'label-' + stamp + '.jpg', sourceSheetId);
-
-    Object.keys(vals).forEach(function (n) { ensureCol_(sh, headers, n); });
-    if (isNew) {
-      row = sh.getLastRow() + 1;
+    // Formula targets are rejected, rather than overwritten with displayed values.
+    var names = Object.keys(vals).concat(photos.bottle ? ['写真URL'] : [], photos.label ? ['ラベル写真URL'] : [], ['保存操作JSON']);
+    names.forEach(function (name) { var col = headers.indexOf(name); if (!isNew && col >= 0 && formulas[col]) throw new Error('数式のある項目はアプリから変更できません: ' + name); });
+    // Fail before photo creation if this Cloud project cannot use Sheets API.
+    sheetApi_(sourceSheetId, '?fields=sheets.properties');
+    if (isNew) row = sh.getLastRow() + 1;
+    var journal = { id: op, digest: payloadDigest, row: row, recordId: recordId, phase: 'preparing', createdAt: Date.now() };
+    props.setProperty(keys.pending, JSON.stringify(journal));
+    var dispatched = false, uploaded = false;
+    try {
+      var stamp = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyyMMdd-HHmmss');
+      if (photos.bottle) { vals['写真URL'] = saveBlob_(photos.bottle, 'bottle-' + stamp + '.jpg', sourceSheetId); uploaded = true; }
+      if (photos.label) { vals['ラベル写真URL'] = saveBlob_(photos.label, 'label-' + stamp + '.jpg', sourceSheetId); uploaded = true; }
+      var nextHeaders = headers.slice(), requests = [], numericSheetId = sh.getSheetId();
+      Object.keys(vals).concat(['保存操作JSON']).forEach(function (name) { if (nextHeaders.indexOf(name) < 0) nextHeaders.push(name); });
+      if (nextHeaders.length > sh.getMaxColumns()) requests.push({ appendDimension: { sheetId: numericSheetId, dimension: 'COLUMNS', length: nextHeaders.length - sh.getMaxColumns() } });
+      if (row > sh.getMaxRows()) requests.push({ appendDimension: { sheetId: numericSheetId, dimension: 'ROWS', length: row - sh.getMaxRows() } });
+      function update(r, c, v) { requests.push({ updateCells: { start: { sheetId: numericSheetId, rowIndex: r - 1, columnIndex: c }, rows: [{ values: [{ userEnteredValue: entered_(v) }] }], fields: 'userEnteredValue' } }); }
+      nextHeaders.forEach(function (name, col) { if (col >= headers.length) update(1, col, name); });
+      var nextValues = nextHeaders.map(function (name, col) { return !isNew && col < current.length ? current[col] : ''; });
+      Object.keys(vals).forEach(function (name) { var col = nextHeaders.indexOf(name); nextValues[col] = vals[name]; update(row, col, vals[name]); });
+      var receiptCol = nextHeaders.indexOf('保存操作JSON'), receipt = { id: op, digest: payloadDigest };
+      nextValues[receiptCol] = JSON.stringify(receipt);
+      var resultVersion = recordVersion_(nextHeaders, nextValues, formulas);
+      receipt.resultVersion = resultVersion; nextValues[receiptCol] = JSON.stringify(receipt); update(row, receiptCol, nextValues[receiptCol]);
+      journal.phase = 'batch'; journal.width = nextHeaders.length; journal.receiptCol = receiptCol; journal.resultVersion = resultVersion;
+      journal.columns = Object.keys(vals).map(function (name) { return nextHeaders.indexOf(name); });
+      journal.changesDigest = digest_(journal.columns.map(function (col) { return [col, entered_(nextHeaders[col]), entered_(nextValues[col])]; }));
+      props.setProperty(keys.pending, JSON.stringify(journal));
+      dispatched = true;
+      try { sheetApi_(sourceSheetId, ':batchUpdate', 'post', { requests: requests }); }
+      catch (err) { if (err.code === 'SAVE_REJECTED' && !uploaded) { props.deleteProperty(keys.pending); throw err; } }
+      return reconcileSave_(props, keys, journal, sourceSheetId, sh);
+    } catch (err) {
+      if (!dispatched && !uploaded && err.code !== 'PHOTO_UNKNOWN') { props.deleteProperty(keys.pending); throw err; }
+      if (err.code === 'SAVE_REJECTED' && !uploaded) throw err;
+      throw saveError_('SAVE_UNKNOWN', '保存結果を確定できません。重複を避けて再送を止めています。' + (err.code === 'PHOTO_UNKNOWN' ? ' 写真も管理者の確認が必要です。' : ''));
     }
-    // 変えた項目(送られてきた列)だけ書く。他の列は触らない。
-    Object.keys(vals).forEach(function (n) {
-      var v = vals[n];
-      sh.getRange(row, headers.indexOf(n) + 1).setValue(v);
-    });
-    var savedVersion = recordVersion_(headers, sh.getRange(row, 1, 1, headers.length).getValues()[0]);
-    return { ok: true, row: row, recordId: recordId, sourceSheetId: sourceSheetId, sourceVersion: savedVersion, costTotalYen: monthTotal_(sourceSheetId) };
   } finally { lock.releaseLock(); }
 }
 
 function actionList_() {
   var sourceSheetId = String(prop_('SHEET_ID') || ''), sh = logSheet_(sourceSheetId), n = sh.getLastRow();
   if (n < 2) return { ok: true, sourceSheetId: sourceSheetId, records: [] };
-  var headers = headers_(sh), data = sh.getRange(2, 1, n - 1, headers.length).getValues(), rev = {}, scRev = {};
+  var headers = headers_(sh), range = sh.getRange(2, 1, n - 1, headers.length), data = range.getValues(), formulaRows = range.getFormulas(), rev = {}, scRev = {};
   Object.keys(KEYMAP).forEach(function (k) { rev[KEYMAP[k]] = k; });
   Object.keys(SCORE).forEach(function (k) { scRev[SCORE[k]] = k; });
   var records = data.map(function (r, idx) {
-    var o = { row: idx + 2, scores: {}, sourceSheetId: sourceSheetId, sourceVersion: recordVersion_(headers, r) };
+    var o = { row: idx + 2, scores: {}, scoreFormat: 'preserve-v1', sourceSheetId: sourceSheetId, sourceVersion: recordVersion_(headers, r, formulaRows[idx]) };
     headers.forEach(function (h, c) {
       var v = r[c];
       if (v === '' || v === null) return;
@@ -287,8 +422,32 @@ function actionList_() {
     if (o.recordId === undefined || o.recordId === null || o.recordId === '') o.recordId = 'r' + o.row;
     try { o.fixed = o.fixedJson ? JSON.parse(o.fixedJson) : []; } catch (e) { o.fixed = []; }
     try { o.estimates = o.estimatesJson ? JSON.parse(o.estimatesJson) : {}; } catch (e) { o.estimates = {}; }
+    var metaCol = headers.indexOf('評価尺度JSON');
+    try { o.scoreMeta = metaCol >= 0 && r[metaCol] ? JSON.parse(r[metaCol]) : {}; } catch (e) { o.scoreMeta = {}; }
+    if (!o.scoreMeta || typeof o.scoreMeta !== 'object' || Array.isArray(o.scoreMeta)) o.scoreMeta = {};
     delete o.fixedJson; delete o.estimatesJson;
     return o;
   }).filter(Boolean);
   return { ok: true, sourceSheetId: sourceSheetId, records: records };
+}
+
+
+function tenScore_(value) {
+  if (typeof value !== 'number' && typeof value !== 'string') return null;
+  if (typeof value === 'string' && !/^\d+(?:\.\d+)?$/.test(value.trim())) return null;
+  var n = Number(value);
+  return isFinite(n) && Math.floor(n) === n && n >= 1 && n <= 10 ? n : null;
+}
+function validatedScoreEdits_(rec, isNew) {
+  var input = rec.scoreMode === 'preserve-v1' ? (rec.scoreEdits || {}) : (rec.scores || {}), result = {};
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('評価の変更内容が無効です');
+  Object.keys(input).forEach(function (k) {
+    if (!Object.prototype.hasOwnProperty.call(SCORE, k)) throw new Error('不明な評価項目です');
+    var edit = rec.scoreMode === 'preserve-v1' ? input[k] : { value: input[k], origin: 'unknown' };
+    if (!edit || typeof edit !== 'object') throw new Error('評価の変更内容が無効です');
+    var value = tenScore_(edit.value);
+    if (value === null || ['user','ai','unknown'].indexOf(edit.origin) < 0) throw new Error('変更した評価は1〜10の整数で指定してください');
+    result[k] = { value: value, origin: edit.origin };
+  });
+  return result;
 }

@@ -11,7 +11,7 @@
 <title>日本酒ログ</title>
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="icons/icon-180.png">
-<link rel="stylesheet" href="css/app.css?v=5">
+<link rel="stylesheet" href="css/app.css?v=8">
 </head>
 <body>
 <div id="bg"><canvas id="petals"></canvas></div>
@@ -45,7 +45,7 @@
       <span id="cost-total" class="big">—</span>
     </div>
     <div class="sec">メモ</div>
-    <textarea class="memo" placeholder="飲んだ場所、合わせた料理など"></textarea>
+    <textarea id="reg-memo" class="memo" placeholder="飲んだ場所、合わせた料理など"></textarea>
     <div class="credit">さけのわデータを利用しています（<a href="https://sakenowa.com/" target="_blank" rel="noopener">sakenowa.com</a>）</div>
   </section>
 
@@ -53,6 +53,7 @@
     <div class="card head">
       <div class="thumb big"><span>瓶</span><img alt=""></div>
       <div class="hinfo">
+        <div id="r-context" class="note"></div>
         <div id="r-name" class="name">—</div>
         <div id="r-sub" class="sub"></div>
         <div id="r-match" class="note"></div>
@@ -65,10 +66,7 @@
       <div class="form" id="basic-form"></div>
     </details>
 
-    <div class="sec">さけのわ 6軸（みんなの評価）</div>
-    <div class="card" id="r-radar"></div>
-
-    <div class="sec">唎酒師の項目（10段階）　線 ＝ 一般的な位置</div>
+    <div class="sec">自分の評価（10段階）　線 ＝ AI推定値</div>
     <div class="card" id="r-params"></div>
     <button id="btn-reest" class="sub-btn" type="button">AIの推定をやり直す</button>
 
@@ -83,7 +81,7 @@
     </div>
 
     <div class="sec">メモ</div>
-    <textarea class="memo" placeholder="メモ"></textarea>
+    <textarea id="result-memo" class="memo" placeholder="メモ"></textarea>
     <button id="btn-save" class="main" type="button">保存</button>
     <div id="save-msg" class="note center"></div>
     <div class="credit">さけのわデータを利用しています（<a href="https://sakenowa.com/" target="_blank" rel="noopener">sakenowa.com</a>）</div>
@@ -118,11 +116,12 @@
 <script src="vendor/browser-image-compression.js"></script>
 <script src="js/config.js?v=1"></script>
 <script src="js/aroma.js?v=1"></script>
-<script src="js/data.js?v=1"></script>
+<script src="js/data.js?v=2"></script>
 <script src="js/api.js?v=3"></script>
 <script src="js/bg.js?v=2"></script>
-<script src="js/viewport.js?v=2"></script>
-<script src="js/record-cache.js?v=1"></script>
-<script src="js/app.js?v=5"></script>
+<script src="js/viewport.js?v=4"></script>
+<script src="js/record-cache.js?v=2"></script>
+<script src="js/scores.js?v=1"></script>
+<script src="js/app.js?v=7"></script>
 </body>
 </html>

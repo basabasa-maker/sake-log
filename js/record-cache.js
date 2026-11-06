@@ -23,6 +23,12 @@
         // Legacy finish descriptions are still needed for the 3-to-10 display conversion.
         if (field === 'scores' && typeof (record[field] || {}).finish === 'string') result[field].finish = record[field].finish;
       });
+      if (record.scoreFormat === 'preserve-v1') result.scoreFormat = 'preserve-v1';
+      result.scoreMeta = {};
+      AXES.forEach(function (axis) {
+        var m = (record.scoreMeta || {})[axis];
+        if (m && m.scale === 10 && ['user','ai','unknown'].indexOf(m.origin) >= 0) result.scoreMeta[axis] = { scale: 10, origin: m.origin };
+      });
       result.fixed = Array.isArray(record.fixed) ? record.fixed.filter(function (axis) { return AXES.indexOf(axis) >= 0; }) : [];
       result.thumb = typeof record.thumb === 'string' && record.thumb.length <= limits.maxThumbChars && /^data:image\/(jpeg|png|webp);base64,[a-z0-9+/=]+$/i.test(record.thumb) ? record.thumb : '';
       return result;
