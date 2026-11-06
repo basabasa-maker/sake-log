@@ -25,3 +25,8 @@
 
 ## クレジット
 さけのわデータ（https://sakenowa.com/）
+
+## GASの注意（2026-11-06）
+- 権限は `drive.file` のみ。`DriveApp` は使えない（フォルダ検索・作成で権限エラー）。写真はDrive Web API（`driveApi_`）で保存し、フォルダIDはスクリプトプロパティ `PHOTO_FOLDER_ID` に持つ。
+- 差分保存: 送られてきた項目だけ書く。`確定項目`・`推定値JSON`・`評価尺度` は、送られたときだけ書く（部分更新で消さない）。
+- GASを直したら `clasp push -f` のあと `clasp deploy -i <ID>` まで必ず行う。反映に10〜20秒かかる。

@@ -122,7 +122,7 @@ function monthTotal_() {
   var sh = costSheet_(), n = sh.getLastRow();
   if (n < 2) return 0;
   var ym = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM'), total = 0;
-  sh.getRange(2, 1, n - 1, 6).getValues().forEach(function (r) { if (String(r[0]).indexOf(ym) === 0) total += Number(r[5]) || 0; });
+  sh.getRange(2, 1, n - 1, 6).getValues().forEach(function (r) { var d = r[0] instanceof Date ? Utilities.formatDate(r[0], 'Asia/Tokyo', 'yyyy-MM') : String(r[0]); if (d.indexOf(ym) === 0) total += Number(r[5]) || 0; });
   return total;
 }
 
@@ -143,11 +143,28 @@ function ensureCol_(sh, headers, name) {
   return headers.length - 1;
 }
 
+function driveApi_(url, opt) {
+  opt = opt || {}; opt.muteHttpExceptions = true;
+  opt.headers = { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() };
+  var r = UrlFetchApp.fetch(url, opt), c = r.getResponseCode();
+  if (c < 200 || c >= 300) throw new Error('Drive呼び出しに失敗(' + c + '): ' + r.getContentText().slice(0, 200));
+  return JSON.parse(r.getContentText());
+}
+function photoFolderId_() {
+  var props = PropertiesService.getScriptProperties(), fid = props.getProperty('PHOTO_FOLDER_ID');
+  if (fid) { try { var f = driveApi_('https://www.googleapis.com/drive/v3/files/' + fid + '?fields=id,trashed'); if (!f.trashed) return fid; } catch (e) {} }
+  var n = driveApi_('https://www.googleapis.com/drive/v3/files?fields=id', { method: 'post', contentType: 'application/json',
+    payload: JSON.stringify({ name: CFG.PHOTO_FOLDER, mimeType: 'application/vnd.google-apps.folder' }) });
+  props.setProperty('PHOTO_FOLDER_ID', n.id);
+  return n.id;
+}
 function saveBlob_(b64, name) {
-  var folders = DriveApp.getFoldersByName(CFG.PHOTO_FOLDER), folder = folders.hasNext() ? folders.next() : DriveApp.createFolder(CFG.PHOTO_FOLDER);
-  var blob = Utilities.newBlob(Utilities.base64Decode(b64), 'image/jpeg', name);
-  var f = folder.createFile(blob);
-  return 'https://drive.google.com/file/d/' + f.getId() + '/view?usp=drivesdk';
+  var parent = photoFolderId_(), bd = 'sakelogboundary';
+  var head = '--' + bd + '\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n' + JSON.stringify({ name: name, parents: [parent] }) +
+    '\r\n--' + bd + '\r\nContent-Type: image/jpeg\r\n\r\n';
+  var bytes = Utilities.newBlob(head).getBytes().concat(Utilities.base64Decode(b64)).concat(Utilities.newBlob('\r\n--' + bd + '--').getBytes());
+  var f = driveApi_('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', { method: 'post', contentType: 'multipart/related; boundary=' + bd, payload: bytes });
+  return 'https://drive.google.com/file/d/' + f.id + '/view?usp=drivesdk';
 }
 
 function actionSave_(b) {
@@ -159,10 +176,10 @@ function actionSave_(b) {
     var vals = {};
     Object.keys(KEYMAP).forEach(function (k) { if (rec[k] !== undefined && rec[k] !== null && ['recordId', 'updatedAt', 'fixedJson', 'estimatesJson', 'bottleUrl', 'labelUrl'].indexOf(k) < 0) vals[KEYMAP[k]] = rec[k]; });
     Object.keys(SCORE).forEach(function (k) { var v = (rec.scores || {})[k]; if (v !== undefined && v !== null && v !== '') vals[SCORE[k]] = Number(v); });
-    vals['評価尺度'] = 10;
+    if (rec.scores) vals['評価尺度'] = 10;
     vals['記録ID'] = recordId;
-    vals['確定項目'] = JSON.stringify(rec.fixed || []);
-    vals['推定値JSON'] = JSON.stringify(rec.estimates || {});
+    if (rec.fixed !== undefined) vals['確定項目'] = JSON.stringify(rec.fixed || []);
+    if (rec.estimates !== undefined) vals['推定値JSON'] = JSON.stringify(rec.estimates || {});
     vals['更新日時'] = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm:ss');
     var stamp = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyyMMdd-HHmmss');
     if (photos.bottle) vals['写真URL'] = saveBlob_(photos.bottle, 'bottle-' + stamp + '.jpg');
