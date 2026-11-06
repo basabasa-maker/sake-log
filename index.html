@@ -11,7 +11,7 @@
 <title>日本酒ログ</title>
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="icons/icon-180.png">
-<link rel="stylesheet" href="css/app.css?v=3">
+<link rel="stylesheet" href="css/app.css?v=4">
 </head>
 <body>
 <div id="bg"><canvas id="petals"></canvas></div>
@@ -91,6 +91,8 @@
 
   <section id="v-list" hidden>
     <input id="q" type="search" placeholder="銘柄・蔵元で絞り込み">
+    <div class="list-toolbar"><button id="l-refresh" class="ghost" type="button">同期する</button></div>
+    <div id="l-sync" class="note" role="status" aria-live="polite"></div>
     <div id="l-count" class="sec"></div>
     <div id="l-items"></div>
     <div class="credit">さけのわデータを利用しています（<a href="https://sakenowa.com/" target="_blank" rel="noopener">sakenowa.com</a>）</div>
@@ -117,9 +119,10 @@
 <script src="js/config.js?v=1"></script>
 <script src="js/aroma.js?v=1"></script>
 <script src="js/data.js?v=1"></script>
-<script src="js/api.js?v=2"></script>
+<script src="js/api.js?v=3"></script>
 <script src="js/bg.js?v=2"></script>
 <script src="js/viewport.js?v=1"></script>
-<script src="js/app.js?v=3"></script>
+<script src="js/record-cache.js?v=1"></script>
+<script src="js/app.js?v=4"></script>
 </body>
 </html>

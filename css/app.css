@@ -98,3 +98,6 @@ summary::-webkit-details-marker{display:none}
 .spin{width:34px;height:34px;border:3px solid var(--line2);border-top-color:var(--gold);border-radius:50%;animation:sp 1s linear infinite}
 @keyframes sp{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){.spin{animation-duration:3s}}
+
+.list-toolbar{display:flex;justify-content:flex-end;margin-top:6px}
+#l-sync{overflow-wrap:anywhere}
