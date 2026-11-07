@@ -16,9 +16,11 @@
   var newEntry = newDraft(), D = newEntry, resultEntry = newEntry;
   var editingDrafts = Object.create(null), navigationVersion = 0;
   var view = 'reg';
+  var detailReturn = null, listRestoration = null, listReturnNotice = '';
+  var staleDetailDrafts = new WeakSet(), retainedDraftSequence = 0;
   var records = [];
   var stateSupported = false, stateEnabled = false, stateTask = null, statePending = false, stateStale = false, trashView = false, archiveView = false, oldestFirst = false, lastUndo = null, stateMessage = '', lastStateNotice = '';
-  var listRequest = 0;
+  var listRequest = 0, listLoading = false;
   var savePending = false;
   var modalVersion = 0;
   var listError = '';
@@ -74,8 +76,9 @@
     syncNote = '最終同期 ' + new Date(lastSync).toLocaleString('ja-JP'); persistList(response);
   }
   function changedConnection() {
+    detailReturn = null; listRestoration = null; listReturnNotice = '';
     stateTask = null; statePending = false; stateStale = false; stateSupported = false; stateEnabled = false; lastUndo = null; stateMessage = ''; lastStateNotice = ''; trashView = false; archiveView = false;
-    connectionVersion++; navigationVersion++; listRequest++; cacheEpoch++; records = []; listLoaded = false; scoreProtocolKnown = false; listFresh = false; lastSync = 0; snapshotSource = ''; syncNote = '';
+    connectionVersion++; navigationVersion++; listRequest++; listLoading=false; cacheEpoch++; records = []; listLoaded = false; scoreProtocolKnown = false; listFresh = false; lastSync = 0; snapshotSource = ''; syncNote = '';
     lastCostCheck = 0; $('#cost-total').textContent = '—';
     if (API.invalidate) API.invalidate();
   }
@@ -89,6 +92,63 @@
 
   /* ---------- 画面切り替え ---------- */
   function editKey(r) { return JSON.stringify([connectionVersion, r.sourceSheetId, r.row, r.recordId, r.sourceVersion]); }
+  function rememberEditDraft(key,draft) {
+    var previous=editingDrafts[key];if(previous&&previous!==draft)editingDrafts[key+'|retained-'+(++retainedDraftSequence)]=previous;
+    editingDrafts[key]=draft;
+  }
+  function sameDraftIdentity(a,b) {
+    if(a.connectionVersion!==connectionVersion||a.sourceSheetId!==b.sourceSheetId)return false;
+    if(a.recordKey&&b.recordKey)return a.recordKey===b.recordKey;
+    var fixedA=!!a.recordId&&!/^r\d+$/.test(a.recordId),fixedB=!!b.recordId&&!/^r\d+$/.test(b.recordId);
+    if(fixedA||fixedB)return fixedA&&fixedB&&a.recordId===b.recordId;
+    // Legacy row identities are reusable only for the exact original snapshot.
+    // Never follow an IDless record across a row, source, or proof change.
+    return !a.recordKey&&!b.recordKey&&a.row!=null&&a.row===b.row&&a.recordId===b.recordId&&!!a.sourceVersion&&sameProof(a,b);
+  }
+  function canReturnToList() { return !!(detailReturn && detailReturn.connection === connectionVersion && detailReturn.draft === D && D.row != null); }
+  function updateDetailBack() {
+    var available = view === 'res' && canReturnToList();
+    $('#detail-back').hidden = !available; $('#detail-back-note').hidden = !available;
+    $('#detail-back').disabled = savePending || statePending || !!stateTask || !$('#busy').hidden;
+    if(staleDetailDrafts.has(D)){$('#btn-save').disabled=savePending||!D.pendingSave;$('#btn-save').textContent=D.pendingSave?'保存結果を確認':'保存';}else $('#btn-save').textContent='保存';
+  }
+  function rememberList(r, button, draft) {
+    var main = $('#main'), box = main.getBoundingClientRect && main.getBoundingClientRect(), rect = button.getBoundingClientRect && button.getBoundingClientRect();
+    return { connection:connectionVersion, draft:draft, query:$('#q').value, archive:archiveView, trash:trashView, oldest:oldestFirst,
+      top:main.scrollTop || 0, offset:box && rect ? rect.top-box.top : null,
+      key:r.recordKey || '', id:r.recordId || '', source:r.sourceSheetId || '', row:r.row, version:r.sourceVersion };
+  }
+  function returnIdentity(r, p) {
+    if (r.sourceSheetId !== p.source) return false;
+    if (p.key) return r.recordKey === p.key;
+    if (p.id && !/^r\d+$/.test(p.id)) return r.recordId === p.id;
+    return r.row === p.row && r.recordId === p.id && r.sourceVersion === p.version;
+  }
+  function restoreListPosition() {
+    var p = listRestoration;
+    function apply() {
+      if (!p || p !== listRestoration || p.navigation !== navigationVersion || view !== 'list' || p.connection !== connectionVersion) return;
+      var main = $('#main'), matches = records.filter(function (r) { return returnIdentity(r,p); }), button = null;
+      if (matches.length === 1) button = $$('#l-items .li').filter(function (b) { return String(b.dataset.row) === String(matches[0].row); })[0];
+      var target = p.top, box = main.getBoundingClientRect && main.getBoundingClientRect(), rect = button && button.getBoundingClientRect && button.getBoundingClientRect();
+      if (box && rect && p.offset !== null) target = (main.scrollTop || 0) + rect.top-box.top-p.offset;
+      var maximum = Number.isFinite(main.scrollHeight) && Number.isFinite(main.clientHeight) ? Math.max(0,main.scrollHeight-main.clientHeight) : Math.max(0,target);
+      main.scrollTop = Math.max(0,Math.min(maximum,target));
+      var focus = button || $('#l-count'); if (focus.focus) focus.focus({preventScroll:true});
+      if (!button) { $('#l-return-note').hidden=false; $('#l-return-note').textContent=listReturnNotice+' 元の記録は現在の一覧にありません。検索条件と表示状態は保持しています。'; }
+    }
+    apply(); if (window.requestAnimationFrame) window.requestAnimationFrame(apply);
+  }
+  function cancelListRestoration() { listRestoration = null; }
+  if ($('#main').addEventListener) ['pointerdown','touchstart','wheel','keydown'].forEach(function (name) { $('#main').addEventListener(name,function(){if(view==='list')cancelListRestoration();},{passive:true}); });
+  $('#detail-back').onclick = function () {
+    if (!canReturnToList() || savePending || statePending || stateTask || !$('#busy').hidden || !$('#modal').hidden) return;
+    var origin=detailReturn, uncertain=!!D.pendingSave;
+    $('#q').value=origin.query;archiveView=origin.archive;trashView=origin.trash;oldestFirst=origin.oldest;
+    origin.notice=uncertain?'保存結果が未確定です。編集内容を保持しています。同じ記録を開いて結果を確認してください。':'';
+    show('list',true,null,origin);
+    if (!uncertain && !listFresh && !listLoading && online()) loadList();
+  };
   function renderRegistration() {
     $('#reg-memo').value = newEntry.memo;
     $$('.slot').forEach(function (slot) {
@@ -97,21 +157,25 @@
       if (photo) image.src = photo.url; else image.removeAttribute('src');
     });
   }
-  function show(v, loadedList, target) {
+  function show(v, loadedList, target, returning) {
     navigationVersion++;
+    listRestoration=null;listReturnNotice='';
+    if(returning){listRestoration=Object.assign({},returning,{navigation:navigationVersion});listReturnNotice=returning.notice;}
     if (v === 'reg') { D = newEntry; resultEntry = newEntry; renderRegistration(); }
     else if (v === 'res') { D = target || resultEntry; resultEntry = D; $('#save-msg').textContent = D.saveMessage || ''; }
     view = v;
+    if(v!=='res')detailReturn=null;
     ['reg', 'res', 'list'].forEach(function (k) { $('#v-' + k).hidden = k !== v; });
     $$('#tabs button').forEach(function (b) { b.classList.toggle('on', b.dataset.v === v); });
     $('#main').scrollTop = 0;
     if (v === 'list') { if (loadedList) drawList(); else loadList(); }
     if (v === 'res') renderResult();
+    updateDetailBack();
     refreshViewport();
   }
   $$('#tabs button').forEach(function (b) { b.onclick = function () { show(b.dataset.v); }; });
 
-  function busy(msg) { if (msg) { $('#busy-msg').textContent = msg; $('#busy').hidden = false; } else { $('#busy').hidden = true; } }
+  function busy(msg) { if (msg) { $('#busy-msg').textContent = msg; $('#busy').hidden = false; } else { $('#busy').hidden = true; } updateDetailBack(); }
   function modal(title, html) { modalVersion++; $('#modal-title').textContent = title; $('#modal-content').innerHTML = html; $('#modal').hidden = false; refreshViewport(); }
   $('#modal-close').onclick = function () { modalVersion++; hideModal(); };
 
@@ -227,10 +291,15 @@
 
   /* ---------- 結果画面 ---------- */
   function renderResult() {
+    updateDetailBack();
     $('#detail-archive').hidden = !D.row || !!D.deletedAt; $('#detail-delete').hidden = !D.row || !!D.deletedAt;
     $('#detail-archive').textContent = D.archived ? 'メモに戻す' : 'アーカイブ';
     $('#detail-archive').disabled = savePending || !!stateTask || !online(); $('#detail-delete').disabled = savePending || !!stateTask || !online();
     $('#btn-save').disabled = !D.started || savePending; $('#btn-reest').disabled = !D.started; $('#btn-pick').disabled = !D.started;
+    if(staleDetailDrafts.has(D)){
+      $('#btn-save').disabled=savePending||!D.pendingSave;$('#btn-reest').disabled=true;$('#btn-pick').disabled=true;$('#detail-archive').disabled=true;$('#detail-delete').disabled=true;
+      $('#detail-back-note').textContent=D.pendingSave?'保存結果が未確定です。新たな保存は行わず結果だけを確認できます。以前の編集内容は保持しています。':'以前の編集を保持しています。記録の版が変わったため保存できません。一覧へ戻り、最新の記録を選んでください。';
+    }else $('#detail-back-note').textContent='保存前の編集は、この起動中は保持します。';
     if (!D.started) {
       $('#r-name').textContent = '写真を読み取るか、一覧から選んでください';
       ['#r-sub','#r-match','#r-context','#r-photos','#basic-form','#r-params','#r-looks','#a-sum','#a-cats','#a-chips','#save-msg'].forEach(function (id) { $(id).innerHTML = ''; $(id).textContent = ''; });
@@ -243,6 +312,7 @@
   function renderHead() {
     $('#r-name').textContent = D.brand || '（銘柄名なし）';
     $('#r-context').textContent = D.row == null ? '新しい記録' : D.revisionReason || '保存済みの記録を編集中 / 改訂履歴へ保存し、原本タブは変更しません';
+    if(staleDetailDrafts.has(D))$('#r-context').textContent='以前の一時編集（版が異なるため保存不可・内容と取得時の情報は保持）';
     $('#r-sub').textContent = [D.brewery, D.area, D.grade].filter(Boolean).join(' ／ ');
     var matched = D.brandId ? SN.brands.filter(function (b) { return b.id === D.brandId; })[0] : null;
     var m = matched ? '銘柄照合: ' + matched.name + '（名称の一致）' : D.brandId ? '銘柄照合: 保存済みのIDあり' : '銘柄照合: 該当なし';
@@ -339,6 +409,7 @@
   $('#btn-save').onclick = saveCurrentDraft;
   function saveCurrentDraft() {
     if (savePending) return;
+    if(staleDetailDrafts.has(D)&&!D.pendingSave){$('#save-msg').textContent='記録の版が変わっています。この一時編集を最新の版へ自動保存しません。一覧から最新の記録を開いてください';return;}
     if (stateTask) { $('#save-msg').textContent = '一覧操作の結果が未確定です。一覧で結果を確認してください'; return; }
     if (D.deletedAt) { $('#save-msg').textContent = 'ごみ箱の記録です。一覧で復元してから保存してください'; return; }
     if (!online()) { $('#save-msg').textContent = 'オフラインでは保存できません。変更は予約していません'; return; }
@@ -367,7 +438,7 @@
     rec.saveOperationId = D.pendingSave.id;
     var draft = D, submittedPhotos = { bottle: D.photos.bottle, label: D.photos.label }, submittedEdits = JSON.stringify(rec.scoreEdits);
     savePending = true;
-    lastSync = 0; listFresh = false;
+    invalidateListRead();
     clearCache(scopeCopy()).catch(function () { cacheNotice = '以前の端末保存を消去できません。一覧を同期してください'; });
     busy('保存中…'); draft.saveMessage = ''; $('#save-msg').textContent = '';
     var saveAction=draft.pendingSave.sent && rec.row!=null ? 'revisionStatus' : 'save';draft.pendingSave.sent=true;
@@ -382,16 +453,16 @@
       if (r.labelUrl) draft.labelUrl = r.labelUrl;
       if (draft.connectionVersion === connectionVersion) {
         Object.keys(editingDrafts).forEach(function (key) { if (editingDrafts[key] === draft) delete editingDrafts[key]; });
-        editingDrafts[editKey(draft)] = draft;
+        rememberEditDraft(editKey(draft),draft);
         if (draft === newEntry) { newEntry = newDraft(); if (view === 'reg') { D = newEntry; resultEntry = newEntry; renderRegistration(); } }
       }
-      if (draft.connectionVersion === connectionVersion) { lastSync = 0; listFresh = false; clearCache(scopeCopy()).catch(function () { cacheNotice = '以前の端末保存を消去できません。一覧を同期してください'; }); }
-      draft.saveMessage = r.revisionConflict ? '改訂は受付済みですが原本との競合があります。一覧を同期してください' : r.acceptedRevision && r.latestView && r.latestView.status !== 'updated' ? '保存しました。最新内容タブは未更新または未確認です（改訂を再送しません）' : '保存しました'; if (D === draft) $('#save-msg').textContent = draft.saveMessage; return !r.revisionConflict;
+      if (draft.connectionVersion === connectionVersion) { invalidateListRead(); clearCache(scopeCopy()).catch(function () { cacheNotice = '以前の端末保存を消去できません。一覧を同期してください'; }); }
+      draft.saveMessage = r.revisionConflict ? '改訂は受付済みですが原本との競合があります。一覧を同期してください' : r.acceptedRevision && r.latestView && r.latestView.status !== 'updated' ? '保存しました。最新内容タブは未更新または未確認です（改訂を再送しません）' : '保存しました'; if (D === draft) $('#save-msg').textContent = draft.saveMessage;updateDetailBack(); return !r.revisionConflict;
     }).catch(function (e) {
       savePending = false; busy();
-      if (draft.connectionVersion === connectionVersion) { lastSync = 0; listFresh = false; clearCache(scopeCopy()).catch(function () { cacheNotice = '以前の端末保存を消去できません。一覧を同期してください'; }); }
+      if (draft.connectionVersion === connectionVersion) { invalidateListRead(); clearCache(scopeCopy()).catch(function () { cacheNotice = '以前の端末保存を消去できません。一覧を同期してください'; }); }
       if (e.code === 'SAVE_REJECTED') draft.pendingSave = null;
-      draft.saveMessage = '保存できませんでした: ' + e.message; if (D === draft) $('#save-msg').textContent = draft.saveMessage; return false;
+      draft.saveMessage = '保存できませんでした: ' + e.message; if (D === draft) $('#save-msg').textContent = draft.saveMessage;updateDetailBack(); return false;
     });
   }
 
@@ -413,26 +484,27 @@
     d.aroma.sel = det; det.forEach(function (x) { if (AROMA_ALL.indexOf(x) < 0) d.aroma.custom.push({ n: x, c: 'ミネラル・他' }); });
     return d;
   }
+  function invalidateListRead() { listRequest++; listLoading=false; lastSync=0; listFresh=false; }
   function loadList(force) {
-    if (statePending || stateTask) { drawList(); return; }
+    if (savePending || statePending || stateTask) { drawList(); return; }
     force = !!(force || mustSync);
-    var request = ++listRequest;
+    var request = ++listRequest; listLoading=true;
     listError = '';
     // The old sl_list has no source identity and is deliberately left unused.
-    if (!API.configured()) { records = []; listLoaded = false; listError = '設定でGASのURLと合言葉を入れてください'; drawList(); return; }
+    if (!API.configured()) { listLoading=false; records = []; listLoaded = false; listError = '設定でGASのURLと合言葉を入れてください'; drawList(); return; }
     if (!force && stateSupported && scoreProtocolKnown && cacheEnabled() && listLoaded && lastSync && Date.now() - lastSync < 300000) {
-      syncNote = (online() ? '端末内の一覧' : 'オフライン・閲覧のみ') + '（最終同期 ' + new Date(lastSync).toLocaleString('ja-JP') + '）'; drawList(); return;
+      listLoading=false; syncNote = (online() ? '端末内の一覧' : 'オフライン・閲覧のみ') + '（最終同期 ' + new Date(lastSync).toLocaleString('ja-JP') + '）'; drawList(); return;
     }
     function synchronize() {
       if (request !== listRequest) return;
-      if (!online()) { listFresh = false; syncNote = 'オフライン・閲覧のみ。変更は予約しません'; drawList(); return; }
+      if (!online()) { listLoading=false; listFresh = false; syncNote = 'オフライン・閲覧のみ。変更は予約しません'; drawList(); return; }
       listFresh = false; syncNote = '同期中…'; drawList();
       API.call('list', { includeTrash:true, recordStateContract:'state-v3', revisionContract:'revision-v1' }).then(function (response) {
         if (request !== listRequest) return;
-        acceptList(response); drawList();
+        listLoading=false; acceptList(response); drawList();
       }).catch(function (error) {
         if (request !== listRequest) return;
-        listFresh = false; stateStale = true;
+        listLoading=false; listFresh = false; stateStale = true;
         if (error.code === 'AUTH' || error.code === 'CONTEXT') { records = []; listLoaded = false; clearCache(scopeCopy()).catch(function () {}); }
         listError = '一覧を取得できませんでした: ' + error.message;
         syncNote = listLoaded ? '保存済みの一覧・最終同期後の更新は未確認です' : '最新の一覧は未確認です'; drawList();
@@ -448,7 +520,7 @@
           records = saved.records; snapshotSource = saved.sourceSheetId; lastSync = saved.savedAt; listLoaded = true; listFresh = false;
           syncNote = '端末保存分（最終同期 ' + new Date(lastSync).toLocaleString('ja-JP') + '）' + (online() ? '' : ' ／ オフライン・閲覧のみ'); drawList();
           if (!scoreProtocolKnown) { cacheNotice = '旧形式の端末保存です。評価の最新状態は再同期後に確認できます'; drawList(); }
-          if (!force && stateSupported && scoreProtocolKnown && Date.now() - saved.savedAt < 300000) return;
+          if (!force && stateSupported && scoreProtocolKnown && Date.now() - saved.savedAt < 300000) { listLoading=false; return; }
         }
         synchronize();
       }).catch(function (error) {
@@ -537,10 +609,12 @@
     stateTask={reorder:true,connection:connectionVersion,payload:{recordStateContract:'state-v3',saveOperationId:'op-'+Date.now().toString(36)+'-'+(Math.random().toString(36).slice(2)+Math.random().toString(36).slice(2)+Math.random().toString(36).slice(2)).slice(0,30),group:group,order:keys.map(function(k){var r=byKey[k],p={};['recordKey','recordId','sourceSheetId','sourceVersion','baseVersion','revisionVersion','stateVersion'].forEach(function(f){p[f]=r[f];});return p;})}};performState(false);
   }
   function drawList() {
+    updateDetailBack();
     if(window.Swipe&&window.Swipe.dispose)window.Swipe.dispose();
     var q = SN.norm($('#q').value), all=records.filter(function(r){return trashView?!!r.deletedAt:!r.deletedAt&&!!r.archived===archiveView;}),items=all.slice().sort(listSort).filter(function(r){return!q||SN.norm(r.brand+' '+r.brewery+' '+(r.memo||'')).indexOf(q)>=0;});
     $('#l-count').textContent = listError || (listLoaded ? (q ? '検索結果 ' + items.length + '件（全'+all.length+'件）' : (trashView?'削除した記録 ':archiveView?'アーカイブ ':'記録 ')+items.length+'件') : 'まだ記録を取得していません');
     $('#l-count').classList.toggle('err', !!listError); $('#l-sync').textContent=[syncNote,cacheNotice].filter(Boolean).join(' ／ ');
+    $('#l-return-note').hidden=!listReturnNotice;$('#l-return-note').textContent=listReturnNotice;
     $('#l-archive').textContent=archiveView?'← メモに戻る':'アーカイブ';$('#l-archive').hidden=trashView;
     $('#l-order').textContent=oldestFirst?'古い順':'新しい順';$('#l-trash').textContent='← 一覧に戻る';$('#l-trash').hidden=!trashView;
     var missingIds=records.filter(function(r){return r.stateMissingId===true;}).length;$('#l-state-availability').hidden=!missingIds;
@@ -572,21 +646,32 @@
         var row = b.closest ? b.closest('.record-row') : null;
         if (row && row.classList.contains('actions-open')) { if (window.Swipe) window.Swipe.setOpen(row, false); return; }
         var r = records.filter(function (x) { return String(x.row) === b.dataset.row; })[0];
-        var key = editKey(r), draft = editingDrafts[key] || fromServer(r); editingDrafts[key] = draft;
-        show('res', false, draft);
+        var candidates=[];Object.keys(editingDrafts).forEach(function(k){var d=editingDrafts[k];if(sameDraftIdentity(d,r)&&candidates.indexOf(d)<0)candidates.push(d);});
+        var older=candidates.filter(function(d){return !sameProof(d,r)||staleDetailDrafts.has(d);});
+        var openingOrigin=rememberList(r,b,null);
+        function open(d){detailReturn=Object.assign({},openingOrigin,{draft:d});show('res',false,d);}
+        function latest(){var d=candidates.filter(function(x){return sameProof(x,r)&&!staleDetailDrafts.has(x);})[0]||fromServer(r);rememberEditDraft(editKey(r),d);open(d);}
+        if(older.length){
+          var connection=connectionVersion;
+          modal('記録が更新されています','<p>以前の画面の編集は保持しています。版が異なる編集を最新の記録へ自動保存しません。</p>'+older.map(function(d,i){return '<button class="sub-btn" type="button" data-retained-draft="'+i+'">以前の編集 '+(i+1)+' を確認（保存不可）</button>';}).join('')+'<button id="detail-open-latest" class="main" type="button">最新の記録を開く</button><button id="detail-open-cancel" class="sub-btn" type="button">キャンセル</button>');
+          $$('#modal-content [data-retained-draft]').forEach(function(el){el.onclick=function(){if(connection!==connectionVersion||view!=='list')return;var d=older[+el.dataset.retainedDraft];staleDetailDrafts.add(d);hideModal();open(d);};});
+          $('#detail-open-cancel').onclick=hideModal;
+          $('#detail-open-latest').onclick=function(){if(connection!==connectionVersion||view!=='list')return;var current=records.filter(function(x){return returnIdentity(x,{source:r.sourceSheetId,key:r.recordKey,id:r.recordId,row:r.row,version:r.sourceVersion});});if(current.length!==1||!sameProof(current[0],r)){hideModal();stateMessage='一覧の内容が変わりました。同期してから記録を開いてください';drawList();return;}hideModal();latest();};
+        }else latest();
       };
     });
+    restoreListPosition();
   }
-  $('#q').oninput = drawList;
-  $('#l-refresh').onclick = function () { stateMessage = ''; loadList(true); };
-  $('#l-trash').onclick = function () { trashView=false;drawList(); };
-  $('#l-archive').onclick=function(){archiveView=!archiveView;trashView=false;drawList();};
-  $('#l-order').onclick=function(){oldestFirst=!oldestFirst;drawList();};
+  $('#q').oninput = function(){cancelListRestoration();drawList();};
+  $('#l-refresh').onclick = function () { cancelListRestoration();stateMessage = ''; loadList(true); };
+  $('#l-trash').onclick = function () { cancelListRestoration();trashView=false;drawList(); };
+  $('#l-archive').onclick=function(){cancelListRestoration();archiveView=!archiveView;trashView=false;drawList();};
+  $('#l-order').onclick=function(){cancelListRestoration();oldestFirst=!oldestFirst;drawList();};
   $('#l-undo').onclick = function () { if (lastUndo) requestState(lastUndo, 'restore', true); };
   $('#l-state-check').onclick = function () { performState(true); };
 
-  $('#detail-archive').onclick=function(){var draft=D,nav=navigationVersion;var saved=saveCurrentDraft();if(saved&&saved.then)saved.then(function(ok){if(ok&&D===draft&&nav===navigationVersion)requestState(draft,draft.archived?'unarchive':'archive',true);});};
-  $('#detail-delete').onclick=function(){requestState(D,'delete',false);};
+  $('#detail-archive').onclick=function(){if(staleDetailDrafts.has(D))return;var draft=D,nav=navigationVersion;var saved=saveCurrentDraft();if(saved&&saved.then)saved.then(function(ok){if(ok&&D===draft&&nav===navigationVersion)requestState(draft,draft.archived?'unarchive':'archive',true);});};
+  $('#detail-delete').onclick=function(){if(!staleDetailDrafts.has(D))requestState(D,'delete',false);};
   $('#modal').onclick=function(e){if(e.target===this){modalVersion++;hideModal();}};
 
   /* ---------- 設定 ---------- */

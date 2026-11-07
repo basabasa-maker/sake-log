@@ -11,7 +11,7 @@
 <title>日本酒ログ</title>
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="icons/icon-180.png">
-<link rel="stylesheet" href="css/app.css?v=10">
+<link rel="stylesheet" href="css/app.css?v=11">
 </head>
 <body>
 <div id="bg"><canvas id="petals"></canvas></div>
@@ -50,6 +50,8 @@
   </section>
 
   <section id="v-res" hidden>
+    <button id="detail-back" class="detail-back" type="button" hidden>← 一覧へ戻る</button>
+    <div id="detail-back-note" class="note" hidden>保存前の編集は、この起動中は保持します。</div>
     <div class="card head">
       <div class="thumb big"><span>瓶</span><img alt=""></div>
       <div class="hinfo">
@@ -92,9 +94,10 @@
     <input id="q" type="search" placeholder="銘柄・蔵元・メモで検索">
     <div class="list-toolbar"><button id="l-archive" class="ghost" type="button">アーカイブ</button><button id="l-order" class="ghost" type="button">新しい順</button><button id="l-refresh" class="ghost" type="button">同期する</button><button id="l-trash" class="ghost" type="button" hidden>ごみ箱</button><button id="l-undo" class="ghost" type="button" hidden>直前の削除を戻す</button><button id="l-state-check" class="ghost" type="button" hidden>結果を確認</button></div>
     <div id="l-sync" class="note" role="status" aria-live="polite"></div>
+    <div id="l-return-note" class="note" role="status" aria-live="polite" hidden></div>
     <div id="l-state-availability" class="note" role="status" aria-live="polite" hidden></div>
     <div id="l-action-msg" class="note" role="status" aria-live="polite"></div>
-    <div id="l-count" class="sec"></div>
+    <div id="l-count" class="sec" tabindex="-1"></div>
     <div id="l-items"></div>
     <div class="credit">さけのわデータを利用しています（<a href="https://sakenowa.com/" target="_blank" rel="noopener">sakenowa.com</a>）</div>
   </section>
@@ -126,6 +129,6 @@
 <script src="js/record-cache.js?v=5"></script>
 <script src="js/scores.js?v=1"></script>
 <script src="js/swipe.js?v=2"></script>
-<script src="js/app.js?v=10"></script>
+<script src="js/app.js?v=11"></script>
 </body>
 </html>
