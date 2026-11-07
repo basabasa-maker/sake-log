@@ -43,11 +43,17 @@ function doPost(e) {
       case 'read': return out_(actionRead_(b));
       case 'estimate': return out_(actionEstimate_(b));
       case 'save': return out_(actionSave_(b));
-      case 'list': return out_(actionList_());
+      case 'list': return out_(actionList_(b));
+      case 'revisionStatus': return out_(actionRevisionSave_(b,true));
+      case 'latestView': return out_(actionLatestView_(b));
+      case 'recordState': return out_(actionRecordState_(b, false));
+      case 'recordReorder': return out_(actionRecordReorder3_(b,false));
+      case 'recordReorderStatus': return out_(actionRecordReorder3_(b,true));
+      case 'recordStateStatus': return out_(actionRecordState_(b, true));
       default: return out_({ ok: false, error: '不明な操作: ' + b.action });
     }
   } catch (err) {
-    return out_({ ok: false, error: String(err && err.message || err), code: err && err.code || (b && b.action === 'save' ? 'SAVE_REJECTED' : '') });
+    return out_({ ok: false, error: String(err && err.message || err), code: err && err.code || (b && b.action === 'revisionStatus' ? 'SAVE_UNKNOWN' : b && ['save','recordState','recordStateStatus','recordReorder','recordReorderStatus','revisionStatus'].indexOf(b.action) >= 0 ? 'SAVE_REJECTED' : '') });
   }
 }
 
@@ -265,6 +271,8 @@ function freshRow_(sheetId, sh, width, row) {
   return { headers: result[1] || [], row: result[row] || [] };
 }
 function verifySave_(sheetId, sh, journal) {
+  if (journal.kind === 'revisionV1') return verifyRevisionSave_(sheetId, sh, journal);
+  if (journal.kind === 'appendV1') return verifyAppendSave_(sheetId, sh, journal);
   var fresh = freshRow_(sheetId, sh, journal.width, journal.row), receipt;
   try { receipt = JSON.parse((fresh.row[journal.receiptCol] || {}).stringValue || ''); } catch (e) { return null; }
   if (receipt.id !== journal.id || receipt.digest !== journal.digest || receipt.resultVersion !== journal.resultVersion) return null;
@@ -276,13 +284,74 @@ function verifySave_(sheetId, sh, journal) {
 }
 function finishSave_(props, pendingKey, doneKey, journal, result) {
   // Persist the acknowledgement before releasing the barrier. No record/photo/token values.
+  if (journal.kind === 'revisionV1') props.setProperty(revisionAnchorKey_(result.sourceSheetId), JSON.stringify({ sheetId:journal.revisionSheetId,count:journal.revisionCount,digest:journal.revisionDigest }));
+  if (journal.kind === 'revisionV1' && journal.hasStatePair) props.setProperty(stateAnchorKey_(result.sourceSheetId),JSON.stringify({sheetId:journal.stateSheetId,count:journal.stateCount,digest:journal.stateDigest}));
+  if (journal.kind === 'recordStateV2' || journal.kind === 'recordReorderV3') props.setProperty(stateAnchorKey_(result.sourceSheetId), JSON.stringify({ sheetId:journal.stateSheetId, count:journal.stateCount, digest:journal.stateDigest }));
   props.setProperty(doneKey, JSON.stringify(journal));
   props.deleteProperty(pendingKey);
   return result;
 }
+
+/* New records use appendCells. Existing edits are handled by the append-only
+ * Revisions.gs module; no positional source-row update fallback is used. */
+var APPEND_V1 = { maxGridRows: 10000, maxGridColumns: 256 };
+function appendSourceInfo_(source, sh) {
+  var info = sheetApi_(source, '?fields=spreadsheetId,sheets.properties');
+  var matches = (info.sheets || []).filter(function (s) { return s.properties.sheetId === sh.getSheetId() && s.properties.title === sh.getName(); });
+  if ((info.spreadsheetId && info.spreadsheetId !== source) || matches.length !== 1) throw new Error('追加先のシートが一致しません');
+  var grid = matches[0].properties.gridProperties || {}, rows = grid.rowCount, columns = grid.columnCount;
+  if (!Number.isInteger(rows) || rows < 1 || rows > APPEND_V1.maxGridRows || !Number.isInteger(columns) || columns < 1 || columns > APPEND_V1.maxGridColumns) throw new Error('追加結果を照合できるシート範囲を超えています');
+  return { rows: rows, columns: columns };
+}
+function freshAppendCells_(source, sh, ranges) {
+  var j = sheetApi_(source, '?includeGridData=true' + ranges.map(function (range) { return '&ranges=' + encodeURIComponent(range); }).join('') + '&fields=sheets(properties(sheetId),data(startRow,startColumn,rowData(values(userEnteredValue))))'), result = {};
+  (j.sheets || []).filter(function (s) { return s.properties.sheetId === sh.getSheetId(); }).forEach(function (s) {
+    (s.data || []).forEach(function (block) { (block.rowData || []).forEach(function (row, i) {
+      var n = (block.startRow || 0) + i + 1; result[n] = result[n] || [];
+      (row.values || []).forEach(function (cell, c) { result[n][(block.startColumn || 0) + c] = cell.userEnteredValue || {}; });
+    }); });
+  });
+  return result;
+}
+function sameAppendHeaders_(cells, expected) {
+  var end = cells.length;
+  while (end && !Object.keys(cells[end - 1] || {}).length) end--;
+  return end === expected.length && expected.every(function (name, c) { var v = cells[c] || {}; return Object.keys(v).length === 1 && v.stringValue === name; });
+}
+function verifyAppendSave_(source, sh, journal) {
+  if (journal.phase !== 'batch' || journal.sourceTabId !== sh.getSheetId() || !Array.isArray(journal.headers)) return null;
+  var info = appendSourceInfo_(source, sh), title = "'" + sh.getName().replace(/'/g,"''") + "'!", idCol = journal.headers.indexOf('記録ID'), receiptCol = journal.headers.indexOf('保存操作JSON');
+  if (idCol < 0 || receiptCol < 0 || info.rows < 2) return null;
+  var grid = freshAppendCells_(source, sh, [title + 'A1:' + colName_(info.columns) + '1', title + colName_(idCol+1) + '2:' + colName_(idCol+1) + info.rows, title + colName_(receiptCol+1) + '2:' + colName_(receiptCol+1) + info.rows]);
+  if (!sameAppendHeaders_(grid[1] || [], journal.headers)) return null;
+  var ids = [], operations = [];
+  Object.keys(grid).forEach(function (key) {
+    var n = Number(key); if (n < 2) return;
+    if (((grid[n] || [])[idCol] || {}).stringValue === journal.recordId) ids.push(n);
+    var receipt; try { receipt = JSON.parse((((grid[n] || [])[receiptCol] || {}).stringValue || '{}')); } catch (e) { return; }
+    if (receipt.id === journal.id) operations.push(n);
+  });
+  if (ids.length !== 1 || operations.length !== 1 || ids[0] !== operations[0]) return null;
+  var row = ids[0], fresh = freshAppendCells_(source, sh, [title + 'A1:' + colName_(info.columns) + '1', title + 'A' + row + ':' + colName_(info.columns) + row]);
+  if (!sameAppendHeaders_(fresh[1] || [], journal.headers)) return null;
+  var cells = fresh[row] || [], receipt;
+  try { receipt = JSON.parse((cells[receiptCol] || {}).stringValue || ''); } catch (e) { return null; }
+  if ((cells[idCol] || {}).stringValue !== journal.recordId || receipt.id !== journal.id || receipt.digest !== journal.digest || receipt.resultVersion !== journal.resultVersion) return null;
+  if (cells.some(function (cell, c) { return c >= journal.width && Object.keys(cell || {}).length; })) return null;
+  var values = journal.headers.map(function (name, c) { var v = cells[c] || {}; return 'stringValue' in v ? v.stringValue : 'numberValue' in v ? v.numberValue : 'boolValue' in v ? v.boolValue : ''; });
+  if (cells.some(function (cell) { return !!(cell || {}).formulaValue; }) || recordVersion_(journal.headers, values, []) !== journal.resultVersion) return null;
+  function text(name) { var c = journal.headers.indexOf(name); return c < 0 ? '' : (cells[c] || {}).stringValue || ''; }
+  return { ok:true, row:row, recordId:journal.recordId, sourceSheetId:source, sourceVersion:journal.resultVersion, bottleUrl:text('写真URL'), labelUrl:text('ラベル写真URL'), revisionFormat:'revision-v1',revisionVersion:'none',baseVersion:journal.resultVersion,recordKey:'id2-'+digest_([source,sh.getSheetId(),journal.recordId]),stateVersion:'none',recordStateFormat:'state-v3',recordStateEnabled:prop_('RECORD_STATE_ENABLED')==='true',stateEligible:prop_('RECORD_STATE_ENABLED')==='true',archived:false,pinned:false,deletedAt:'',sortOrder:0 };
+}
 function saveKeys_(sheetId, id) { var prefix = 'SAKE_SAVE_V1_' + digest_(sheetId).slice(0, 20) + '_'; return { pending: prefix + 'PENDING', done: prefix + 'DONE_' + digest_(id) }; }
 function reconcileSave_(props, keys, journal, sheetId, sh) {
   var result;
+  if (journal.kind === 'recordStateV2' || journal.kind === 'recordReorderV3') {
+    try { result = journal.kind === 'recordReorderV3' ? verifyReorder3_(sheetId,journal) : verifyStateSave_(sheetId, journal); } catch (e) { result = null; }
+    if (!result) throw saveError_('SAVE_UNKNOWN', '一覧操作の結果が未確定です。再送せず管理者へ確認してください');
+    try { return finishSave_(props, keys.pending, saveKeys_(sheetId, journal.id).done, journal, result); }
+    catch (error) { throw saveError_('SAVE_UNKNOWN', '一覧状態は反映済みの可能性があります。確認情報が完了するまで再送しません'); }
+  }
   try { result = journal.phase === 'batch' ? verifySave_(sheetId, sh, journal) : null; } catch (e) { result = null; }
   if (!result) throw saveError_('SAVE_UNKNOWN', '前の保存結果が未確定です。再送は停止しています。管理者が保存操作JSONと待機情報を確認してください');
   try { return finishSave_(props, keys.pending, saveKeys_(sheetId, journal.id).done, journal, result); }
@@ -301,18 +370,22 @@ function pruneSaveReceipts_(props) {
 
 function actionSave_(b) {
   var rec = b.record || {}, photos = b.photos || {};
+  if (rec.row !== undefined && rec.row !== null && rec.row !== '') return actionRevisionSave_(b);
   var sourceSheetId = String(prop_('SHEET_ID') || '');
   if (rec.sourceSheetId && String(rec.sourceSheetId) !== sourceSheetId) throw new Error('接続先が変わりました。一覧から記録を選び直してください');
   var lock = LockService.getScriptLock(); lock.waitLock(30000);
   try {
+    if (String(prop_('SHEET_ID') || '') !== sourceSheetId) throw new Error('接続先が変わりました。一覧を同期してください');
     var sh = logSheet_(sourceSheetId), headers = headers_(sh);
     var op = String(rec.saveOperationId || ''), stampMs = parseInt(op.split('-')[1], 36);
     if (!/^op-[a-z0-9]+-[A-Za-z0-9_-]{20,100}$/.test(op) || !isFinite(stampMs) || Math.abs(Date.now() - stampMs) > 7 * 86400000) throw new Error('更新版アプリで保存してください（保存操作IDの期限は7日です）');
     var payloadDigest = digest_(sorted_({ record: rec, photos: photos })), keys = saveKeys_(sourceSheetId, op), props = PropertiesService.getScriptProperties();
     var pending = props.getProperty(keys.pending), done = props.getProperty(keys.done);
     if (pending) {
-      var previous = JSON.parse(pending), recovered = reconcileSave_(props, keys, previous, sourceSheetId, sh);
-      if (previous.id === op) { if (previous.digest !== payloadDigest) throw new Error('同じ保存操作の内容が変わっています'); return recovered; }
+      var previous = JSON.parse(pending);
+      if (previous.id === op && previous.digest !== payloadDigest) throw new Error('同じ保存操作の内容が変わっています');
+      var recovered = reconcileSave_(props, keys, previous, sourceSheetId, sh);
+      if (previous.id === op) return recovered;
       throw saveError_('SAVE_REJECTED', '前の保存は確認できました。今回の別操作は実行していません。一覧を同期して重複がないか確認してください');
     }
     if (done) {
@@ -323,36 +396,15 @@ function actionSave_(b) {
       return replay;
     }
     pruneSaveReceipts_(props);
-    var isNew = rec.row === undefined || rec.row === null || rec.row === '';
-    var recordId = rec.recordId === undefined || rec.recordId === null || rec.recordId === '' ? Utilities.getUuid() : rec.recordId;
-    var row;
-    if (!isNew) {
-      row = Number(rec.row);
-      if (!isFinite(row) || Math.floor(row) !== row || row < 2 || row > sh.getLastRow()) throw new Error('対象の行が見つかりません');
-      if (!rec.sourceSheetId || !rec.sourceVersion) throw new Error('一覧を開き直してから保存してください');
-      var current = sh.getRange(row, 1, 1, headers.length).getValues()[0], formulas = sh.getRange(row, 1, 1, headers.length).getFormulas()[0];
-      if (rec.sourceVersion !== recordVersion_(headers, current, formulas)) throw new Error('記録が更新または移動されました。一覧を開き直してください');
-      var idCol = headers.indexOf('記録ID'), currentId = idCol >= 0 ? String(current[idCol] == null ? '' : current[idCol]) : '';
-      if (currentId && String(rec.recordId) !== currentId) throw new Error('対象の記録が変わりました。一覧を開き直してください');
-    }
-    // Validate the score protocol before photos, columns, or cells can be changed.
-    if (!isNew && rec.scoreMode !== 'preserve-v1') throw new Error('評価を保持する更新版アプリで一覧を開き直してから保存してください');
-    var scoreEdits = validatedScoreEdits_(rec, isNew);
-    var scoreMeta = {};
-    var metaCol = headers.indexOf('評価尺度JSON');
-    if (!isNew && Object.keys(scoreEdits).length && metaCol >= 0 && current[metaCol]) {
-      try { scoreMeta = JSON.parse(current[metaCol]); } catch (e) { throw new Error('評価尺度の補助情報を確認できません。記録を変更せず管理者に確認してください'); }
-      if (!scoreMeta || typeof scoreMeta !== 'object' || Array.isArray(scoreMeta)) throw new Error('評価尺度の補助情報が無効です');
-    }
+    var isNew = true, recordId = Utilities.getUuid(), row, formulas = [];
+    var scoreEdits = validatedScoreEdits_(rec, true), scoreMeta = {};
     var vals = {};
     Object.keys(KEYMAP).forEach(function (k) { if (rec[k] !== undefined && rec[k] !== null && ['recordId', 'updatedAt', 'fixedJson', 'estimatesJson', 'bottleUrl', 'labelUrl', 'scale'].indexOf(k) < 0) vals[KEYMAP[k]] = rec[k]; });
     Object.keys(scoreEdits).forEach(function (k) {
       var edit = scoreEdits[k], col = headers.indexOf(SCORE[k]);
-      var previous = !isNew && col >= 0 ? current[col] : null, previousMeta = scoreMeta[k];
+      var previous = null, previousMeta = scoreMeta[k];
       var scaleCol = headers.indexOf('評価尺度');
       scoreMeta[k] = { scale: 10, origin: edit.origin };
-      if (!isNew) scoreMeta[k].previous = { value: previous, scale: previousMeta && previousMeta.scale === 10 ? 10 : scaleCol >= 0 ? current[scaleCol] : null };
-      if (!isNew) scoreMeta[k].original = previousMeta && previousMeta.original || scoreMeta[k].previous;
       vals[SCORE[k]] = edit.value;
     });
     if (Object.keys(scoreEdits).length) vals['評価尺度JSON'] = JSON.stringify(scoreMeta);
@@ -364,11 +416,19 @@ function actionSave_(b) {
     vals['更新日時'] = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm:ss');
     // Formula targets are rejected, rather than overwritten with displayed values.
     var names = Object.keys(vals).concat(photos.bottle ? ['写真URL'] : [], photos.label ? ['ラベル写真URL'] : [], ['保存操作JSON']);
-    names.forEach(function (name) { var col = headers.indexOf(name); if (!isNew && col >= 0 && formulas[col]) throw new Error('数式のある項目はアプリから変更できません: ' + name); });
+    if (isNew) {
+      var distinct = {};
+      if (headers.some(function (name) { if (!name || distinct[name]) return true; distinct[name] = true; return false; }) || names.some(function (name) { return headers.indexOf(name) < 0; })) {
+        throw saveError_('SCHEMA_PREPARATION_REQUIRED', '新規保存の列構成を先に準備する必要があります。下書きを保持し、管理者へ確認してください');
+      }
+      // Fresh REST read, not SpreadsheetApp's cached header. This is a schema
+      // preflight, not a CAS; post-dispatch schema changes stay unresolved.
+      var appendInfo = appendSourceInfo_(sourceSheetId, sh);
+      if (!sameAppendHeaders_(freshAppendCells_(sourceSheetId, sh, ["'" + sh.getName().replace(/'/g,"''") + "'!A1:" + colName_(appendInfo.columns) + '1'])[1] || [], headers)) throw saveError_('SCHEMA_PREPARATION_REQUIRED', '列構成が変わりました。新規保存せず同期してください');
+    }
     // Fail before photo creation if this Cloud project cannot use Sheets API.
     sheetApi_(sourceSheetId, '?fields=sheets.properties');
-    if (isNew) row = sh.getLastRow() + 1;
-    var journal = { id: op, digest: payloadDigest, row: row, recordId: recordId, phase: 'preparing', createdAt: Date.now() };
+    var journal = { id: op, digest: payloadDigest, kind: isNew ? 'appendV1' : 'save', row: row, recordId: recordId, phase: 'preparing', createdAt: Date.now() };
     props.setProperty(keys.pending, JSON.stringify(journal));
     var dispatched = false, uploaded = false;
     try {
@@ -377,17 +437,15 @@ function actionSave_(b) {
       if (photos.label) { vals['ラベル写真URL'] = saveBlob_(photos.label, 'label-' + stamp + '.jpg', sourceSheetId); uploaded = true; }
       var nextHeaders = headers.slice(), requests = [], numericSheetId = sh.getSheetId();
       Object.keys(vals).concat(['保存操作JSON']).forEach(function (name) { if (nextHeaders.indexOf(name) < 0) nextHeaders.push(name); });
-      if (nextHeaders.length > sh.getMaxColumns()) requests.push({ appendDimension: { sheetId: numericSheetId, dimension: 'COLUMNS', length: nextHeaders.length - sh.getMaxColumns() } });
-      if (row > sh.getMaxRows()) requests.push({ appendDimension: { sheetId: numericSheetId, dimension: 'ROWS', length: row - sh.getMaxRows() } });
-      function update(r, c, v) { requests.push({ updateCells: { start: { sheetId: numericSheetId, rowIndex: r - 1, columnIndex: c }, rows: [{ values: [{ userEnteredValue: entered_(v) }] }], fields: 'userEnteredValue' } }); }
-      nextHeaders.forEach(function (name, col) { if (col >= headers.length) update(1, col, name); });
-      var nextValues = nextHeaders.map(function (name, col) { return !isNew && col < current.length ? current[col] : ''; });
-      Object.keys(vals).forEach(function (name) { var col = nextHeaders.indexOf(name); nextValues[col] = vals[name]; update(row, col, vals[name]); });
-      var receiptCol = nextHeaders.indexOf('保存操作JSON'), receipt = { id: op, digest: payloadDigest };
+      var nextValues = nextHeaders.map(function () { return ''; });
+      Object.keys(vals).forEach(function (name) { nextValues[nextHeaders.indexOf(name)] = vals[name]; });
+      var receiptCol = nextHeaders.indexOf('保存操作JSON'), receipt = { id: op, digest: payloadDigest,kind:'appendV1',createdAt:Date.now() };
       nextValues[receiptCol] = JSON.stringify(receipt);
       var resultVersion = recordVersion_(nextHeaders, nextValues, formulas);
-      receipt.resultVersion = resultVersion; nextValues[receiptCol] = JSON.stringify(receipt); update(row, receiptCol, nextValues[receiptCol]);
+      receipt.resultVersion = resultVersion; nextValues[receiptCol] = JSON.stringify(receipt);
+      requests.push({ appendCells: { sheetId: numericSheetId, rows: [{ values: nextValues.map(function (v) { return { userEnteredValue: entered_(v) }; }) }], fields: 'userEnteredValue' } });
       journal.phase = 'batch'; journal.width = nextHeaders.length; journal.receiptCol = receiptCol; journal.resultVersion = resultVersion;
+      if (isNew) { journal.headers = nextHeaders; journal.sourceTabId = numericSheetId; }
       journal.columns = Object.keys(vals).map(function (name) { return nextHeaders.indexOf(name); });
       journal.changesDigest = digest_(journal.columns.map(function (col) { return [col, entered_(nextHeaders[col]), entered_(nextValues[col])]; }));
       props.setProperty(keys.pending, JSON.stringify(journal));
@@ -403,10 +461,17 @@ function actionSave_(b) {
   } finally { lock.releaseLock(); }
 }
 
-function actionList_() {
-  var sourceSheetId = String(prop_('SHEET_ID') || ''), sh = logSheet_(sourceSheetId), n = sh.getLastRow();
-  if (n < 2) return { ok: true, sourceSheetId: sourceSheetId, records: [] };
-  var headers = headers_(sh), range = sh.getRange(2, 1, n - 1, headers.length), data = range.getValues(), formulaRows = range.getFormulas(), rev = {}, scRev = {};
+function sourceSnapshot_(source, sh) {
+  var height = Math.max(1, sh.getLastRow()), width = Math.max(1, sh.getLastColumn()), range = sh.getRange(1, 1, height, width);
+  // Header, identity and visible body values come from the same returned grid.
+  var grid = range.getValues(), expressions = range.getFormulas();
+  return { source:source, tabId:sh.getSheetId(), headers:grid[0].map(String), data:grid.slice(1), formulas:expressions.slice(1) };
+}
+function baseList_(snapshot) {
+  snapshot = snapshot || sourceSnapshot_(String(prop_('SHEET_ID') || ''), logSheet_());
+  var sourceSheetId = snapshot.source;
+  if (!snapshot.data.length) return { ok: true, sourceSheetId: sourceSheetId, records: [] };
+  var headers = snapshot.headers, data = snapshot.data, formulaRows = snapshot.formulas, rev = {}, scRev = {};
   Object.keys(KEYMAP).forEach(function (k) { rev[KEYMAP[k]] = k; });
   Object.keys(SCORE).forEach(function (k) { scRev[SCORE[k]] = k; });
   var records = data.map(function (r, idx) {
@@ -425,6 +490,7 @@ function actionList_() {
     var metaCol = headers.indexOf('評価尺度JSON');
     try { o.scoreMeta = metaCol >= 0 && r[metaCol] ? JSON.parse(r[metaCol]) : {}; } catch (e) { o.scoreMeta = {}; }
     if (!o.scoreMeta || typeof o.scoreMeta !== 'object' || Array.isArray(o.scoreMeta)) o.scoreMeta = {};
+    var receiptCol=headers.indexOf('保存操作JSON'),receipt;try{receipt=receiptCol>=0&&r[receiptCol]?JSON.parse(r[receiptCol]):null;}catch(e){receipt=null;}if(receipt&&receipt.kind==='appendV1'&&Number.isFinite(receipt.createdAt)&&receipt.createdAt>0){o.createdAt=new Date(receipt.createdAt).toISOString();o.creationKnown=true;}else{o.createdAt='';o.creationKnown=false;}
     delete o.fixedJson; delete o.estimatesJson;
     return o;
   }).filter(Boolean);
@@ -451,3 +517,114 @@ function validatedScoreEdits_(rec, isNew) {
   });
   return result;
 }
+
+
+/* ---------- Immutable, row-independent list state (unpublished, default off) ---------- */
+var STATE_V2 = { name: '日本酒ログ_一覧状態_v2', header: '状態イベントJSON_v2', maxEvents: 10000 };
+function stateEventHash_(event) { var copy = Object.assign({}, event); delete copy.hash; return digest_(sorted_(copy)); }
+function stateAnchorKey_(source) { return 'SAKE_STATE_V2_' + digest_(source).slice(0,20) + '_MANIFEST'; }
+function stateManifest_(events) { return digest_(events.map(function (e) { return e.hash; }).sort()); }
+function stateTable_(source, fresh, expectedJournal) {
+  var rawAnchor=prop_(stateAnchorKey_(source)), anchor=rawAnchor ? JSON.parse(rawAnchor) : null, rawPending=prop_(saveKeys_(source,'').pending), pending=rawPending ? JSON.parse(rawPending) : null;
+  if (!fresh && pending && (pending.kind==='recordStateV2'||pending.kind==='recordReorderV3'||pending.kind==='revisionV1'&&pending.hasStatePair)) throw new Error('一覧操作の結果が未確定です。先に結果を確認してください');
+  var table = SpreadsheetApp.openById(source).getSheetByName(STATE_V2.name), values, formulas;
+  if (!fresh) {
+    if (!table) { if(anchor)throw new Error('保存済みの状態表が見つかりません。状態を消した扱いにはしません'); return { sheetId: null, events: [], heads: {} }; }
+    if (table.getLastRow() > STATE_V2.maxEvents + 1) throw new Error('一覧状態の上限です。自動削除せず管理者に確認してください');
+    values = table.getRange(1, 1, Math.max(1, table.getLastRow()), Math.max(1, table.getLastColumn())).getValues();
+    formulas = table.getRange(1, 1, values.length, values[0].length).getFormulas();
+  } else {
+    var j = sheetApi_(source, '?includeGridData=true&ranges=' + encodeURIComponent("'" + STATE_V2.name + "'!A1:A" + (STATE_V2.maxEvents + 2)) + '&fields=sheets(properties(sheetId,title),data(startRow,rowData(values(userEnteredValue))))');
+    var sheets = (j.sheets || []).filter(function (s) { return s.properties.title === STATE_V2.name; });
+    if (sheets.length !== 1) throw new Error('一覧状態の保存先が一致しません');
+    table = { getSheetId: function () { return sheets[0].properties.sheetId; } }; values = []; formulas = [];
+    (sheets[0].data || []).forEach(function (block) { (block.rowData || []).forEach(function (row, i) {
+      var n = (block.startRow || 0) + i; values[n] = []; formulas[n] = [];
+      (row.values || []).forEach(function (cell, col) { var v = cell.userEnteredValue || {}; values[n][col] = v.stringValue === undefined ? ('numberValue' in v ? v.numberValue : 'boolValue' in v ? v.boolValue : '') : v.stringValue; formulas[n][col] = v.formulaValue || ''; });
+    }); });
+  }
+  if (!values[0] || values[0][0] !== STATE_V2.header || values.length > STATE_V2.maxEvents + 1) throw new Error('一覧状態の形式または上限を確認してください');
+  var events = [], byHash = {}, byId = {}, groups = {}, heads = {};
+  values.forEach(function (row, i) {
+    if (row.slice(1).some(function (v) { return v !== '' && v != null; }) || (formulas[i] || []).some(Boolean)) throw new Error('一覧状態の列または数式が変更されています');
+    if (!i || !row[0]) return;
+    var e; try { e = JSON.parse(row[0]); } catch (err) { throw new Error('一覧状態のJSONが壊れています'); }
+    if (!e || [2,3].indexOf(e.v)<0 || (e.v===3&&(typeof e.archived!=='boolean'||!Number.isInteger(e.sortOrder)||e.sortOrder<0||e.sortOrder>1000000000||!/^(none|[a-f0-9]{64})$/.test(e.revisionHead||''))) || !Number.isInteger(e.tabId) || e.tabId < 0 || e.source !== source || !/^id2-[a-f0-9]{64}$/.test(e.key) || !/^fp2-[a-f0-9]{64}$/.test(e.fingerprint) || !/^[a-f0-9]{64}$/.test(e.hash || '') || !/^[a-f0-9]{64}$/.test(e.digest || '') || !/^op-[a-z0-9]+-[A-Za-z0-9_-]{20,100}$/.test(e.id || '') || typeof e.deletedAt !== 'string' || typeof e.pinned !== 'boolean' || !isFinite(e.createdAt) || stateEventHash_(e) !== e.hash || byHash[e.hash] || byId[e.id]) throw new Error('一覧状態の整合性を確認できません');
+    byHash[e.hash] = e; byId[e.id] = e; (groups[e.key] || (groups[e.key] = [])).push(e); events.push(e);
+  });
+  Object.keys(groups).forEach(function (key) {
+    var group = groups[key], children = {}, root = [];
+    group.forEach(function (e) { if (e.previous === 'none') root.push(e); else { if (!byHash[e.previous] || byHash[e.previous].key !== key || children[e.previous]) throw new Error('一覧状態が分岐または欠損しています'); children[e.previous] = e; } });
+    if (root.length !== 1) throw new Error('一覧状態の開始点が一致しません');
+    var current = root[0], count = 1; while (children[current.hash]) { current = children[current.hash]; if (++count > group.length) throw new Error('一覧状態が循環しています'); }
+    if (count !== group.length) throw new Error('一覧状態の連続性がありません'); heads[key] = current;
+  });
+  var proof = fresh && expectedJournal && pending && pending.id===expectedJournal.id ? { sheetId:expectedJournal.stateSheetId, count:expectedJournal.stateCount, digest:expectedJournal.stateDigest } : anchor;
+  if (!proof || proof.sheetId!==table.getSheetId() || proof.count!==events.length || proof.digest!==stateManifest_(events)) throw new Error('状態表の保存確認と件数・内容が一致しません。削除や復元を推定しません');
+  return { sheetId: table.getSheetId(), events: events, heads: heads };
+}
+function stateIndex_(source, sh, table, snapshot) {
+  snapshot = snapshot || sourceSnapshot_(source, sh);
+  var headers = snapshot.headers, values = snapshot.data, formulas = snapshot.formulas, seen = {};
+  if (!headers.length || !values.length) return { entries: [], notice: '' };
+  headers.forEach(function (h) { if (h && seen[h]) throw new Error('列名が重複し記録を安全に識別できません'); if (h) seen[h] = true; });
+  var ids = {}, entries = [];
+  values.forEach(function (row, i) {
+    var brand = headers.indexOf('銘柄名'); if (brand < 0 || !String(row[brand] == null ? '' : row[brand]).trim()) return;
+    var content = {}, invalid = '';
+    headers.forEach(function (h, col) {
+      var value = row[col] == null ? '' : row[col], expression = (formulas[i] || [])[col];
+      if ((h === '削除日時' || h === 'ピン留め') && value !== '' && value !== false) throw new Error('旧方式の状態列があります。自動移行せず管理者に確認してください');
+      if (['保存操作JSON','更新日時','削除日時','ピン留め'].indexOf(h) >= 0) return;
+      if (!h && (expression || value !== '')) { invalid = '列名のない値があり識別できません'; return; }
+      if (expression) content[h] = { formula: expression }; else if (value !== '') content[h] = value instanceof Date ? { dateMs: value.getTime() } : value;
+    });
+    var idCol = headers.indexOf('記録ID'), rawId=idCol<0 ? '' : row[idCol], id = rawId == null ? '' : String(rawId);
+    if (!id.trim()) id='';
+    if (id && ((typeof rawId!=='string' && typeof rawId!=='number') || (typeof rawId==='number' && !isFinite(rawId)) || id.length>256)) invalid='固定IDの型または長さを確認してください';
+    if (idCol >= 0 && (formulas[i] || [])[idCol]) invalid = '固定IDの数式は利用できません';
+    var key = id ? 'id2-' + digest_([source,snapshot.tabId,id]) : '', fingerprint = 'fp2-' + digest_(sorted_(content));
+    if (id) ids[id] = (ids[id] || 0) + 1;
+    entries.push({ row:i+2, recordId:id || 'r'+(i+2), id:id, key:key, fingerprint:fingerprint, sourceVersion:recordVersion_(headers,row,formulas[i]), reason:invalid });
+  });
+  var matched = {};
+  entries.forEach(function (entry) {
+    entry.reason = entry.reason || (!entry.id ? '固定IDのない旧記録は一覧操作できません' : ids[entry.id] !== 1 ? '記録IDが重複しています' : '');
+    var head = table.heads[entry.key]; entry.stateVersion = head ? head.hash : 'none';
+    entry.deletedAt = ''; entry.pinned = false;entry.archived=false;entry.sortOrder=0;
+    if (head && (head.deletedAt || head.pinned || head.archived || head.sortOrder) && head.fingerprint !== entry.fingerprint) entry.reason = entry.reason || '内容変更により状態が競合しています。別版へ自動適用しません';
+    if (head && !entry.reason && head.fingerprint === entry.fingerprint) { entry.deletedAt = head.deletedAt; entry.pinned = head.pinned;entry.archived=!!head.archived;entry.sortOrder=Number(head.sortOrder)||0; matched[entry.key] = true; }
+  });
+  var detached = Object.keys(table.heads).filter(function (key) { var h = table.heads[key]; return (h.deletedAt || h.pinned || h.archived || h.sortOrder) && !matched[key]; }).length;
+  return { entries:entries, notice:detached ? '内容変更・欠落・ID重複により適用しない状態が' + detached + '件あります。別記録には引き継いでいません' : '' };
+}
+function assertEditableState_(source, sh, row) {
+  var table = stateTable_(source, false); if (!table.events.length) return;
+  var entry = stateIndex_(source, sh, table).entries.filter(function (e) { return e.row === row; })[0];
+  if (entry && ((entry.reason && table.heads[entry.key]) || entry.deletedAt || entry.pinned)) throw new Error('一覧状態を安全に保持するため、復元・ピン解除後に編集してください');
+}
+function legacyActionList_(b) {
+  var source = String(prop_('SHEET_ID') || ''), sh = logSheet_(source), snapshot = sourceSnapshot_(source, sh), response = baseList_(snapshot), table = stateTable_(source, false), index = stateIndex_(source, sh, table, snapshot);
+  var capable = !!(b && b.includeTrash === true && b.recordStateContract === 'state-v3'), enabled=prop_('RECORD_STATE_ENABLED') === 'true';
+  if(Object.keys(table.heads).some(function(k){return table.heads[k].v===3&&table.heads[k].revisionHead!=='none';}))throw new Error('改訂の確認情報が必要です');
+  if (!capable && index.notice) throw new Error('一覧状態が競合しています。更新版アプリで確認してください');
+  response.recordStateFormat = capable ? 'state-v3' : ''; response.recordStateEnabled=enabled; response.stateNotice = index.notice;
+  response.records = response.records.map(function (r) {
+    var e = index.entries.filter(function (e) { return e.row === r.row; })[0];
+    if (!e) throw new Error('一覧の識別情報を確認できません');
+    r.deletedAt = e.deletedAt; r.pinned = e.pinned;r.archived=e.archived;r.sortOrder=e.sortOrder; r.stateMissingId=!e.id; r.stateReason=e.reason;
+    if ((r.deletedAt||r.archived) && !capable) return null;
+    r.stateEligible=capable && enabled && !e.reason;
+    if (capable) { r.recordKey=e.key; r.stateVersion=e.stateVersion; }
+    return r;
+  }).filter(Boolean); return response;
+}
+function verifyStateSave_(source, journal) {
+  var table = stateTable_(source, true, journal), event = table.events.filter(function (e) { return e.id === journal.id && e.digest === journal.digest && e.hash === journal.eventHash; })[0];
+  if (!event || table.sheetId !== journal.stateSheetId || !table.heads[event.key] || table.heads[event.key].hash !== event.hash) return null;
+  var index = revisionUses_(source) ? revisionContext_(source, logSheet_(source), table).index : stateIndex_(source, logSheet_(source), table), target = index.entries.filter(function (e) { return e.key === event.key && !e.reason && !e.revisionReason && e.fingerprint === event.fingerprint; });
+  var r = { ok:true, recordStateFormat:'state-v3', recordKey:event.key, stateVersion:event.hash, sourceSheetId:source, deletedAt:event.deletedAt, pinned:event.pinned,archived:!!event.archived,sortOrder:Number(event.sortOrder)||0, targetMissing:target.length !== 1 };
+  if (!r.targetMissing) { r.row=target[0].row; r.recordId=target[0].recordId; r.sourceVersion=target[0].sourceVersion;if(revisionUses_(source)){r.revisionFormat='revision-v1';r.revisionVersion=target[0].revisionVersion;r.baseVersion=target[0].baseVersion;} }
+  return r;
+}
+function actionRecordState_(b,checkOnly){return actionRecordState3_(b,checkOnly);}

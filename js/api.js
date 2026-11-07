@@ -41,13 +41,15 @@
     if (!Array.isArray(j.records)) throw new Error('一覧データの形式が違います。GASの公開URLを確認してください');
     return j;
   }
-  function checkConnection(endpoint, passphrase) {
+  function checkConnection(endpoint, passphrase, options) {
+    var listOptions = options && options.recordStateContract === 'state-v3' ? { includeTrash:true, recordStateContract:'state-v3' } : {};
+    if(options && options.revisionContract === 'revision-v1')listOptions.revisionContract='revision-v1';
     try {
       var u = new URL(endpoint);
       if (u.protocol !== 'https:' || u.hostname !== 'script.google.com' || !/^\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(u.pathname) || u.search || u.hash) throw new Error();
     } catch (e) { return Promise.reject(new Error('GASのウェブアプリURL（https://script.google.com/macros/s/…/exec）を入力してください')); }
     if (!passphrase) return Promise.reject(new Error('GASに保存した合言葉を入力してください'));
-    return (MOCK ? checked(mock('list'), contextVersion, 'list') : request(endpoint, passphrase, 'list')).then(checkedList);
+    return (MOCK ? checked(mock('list', listOptions), contextVersion, 'list') : request(endpoint, passphrase, 'list', listOptions)).then(checkedList);
   }
 
   function done(j) {

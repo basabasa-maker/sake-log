@@ -11,7 +11,7 @@
 <title>日本酒ログ</title>
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="icons/icon-180.png">
-<link rel="stylesheet" href="css/app.css?v=8">
+<link rel="stylesheet" href="css/app.css?v=10">
 </head>
 <body>
 <div id="bg"><canvas id="petals"></canvas></div>
@@ -83,14 +83,17 @@
     <div class="sec">メモ</div>
     <textarea id="result-memo" class="memo" placeholder="メモ"></textarea>
     <button id="btn-save" class="main" type="button">保存</button>
+    <div class="detail-actions"><button id="detail-archive" class="sub-btn" type="button" hidden>アーカイブ</button><button id="detail-delete" class="sub-btn" type="button" hidden>削除</button></div>
     <div id="save-msg" class="note center"></div>
     <div class="credit">さけのわデータを利用しています（<a href="https://sakenowa.com/" target="_blank" rel="noopener">sakenowa.com</a>）</div>
   </section>
 
   <section id="v-list" hidden>
-    <input id="q" type="search" placeholder="銘柄・蔵元で絞り込み">
-    <div class="list-toolbar"><button id="l-refresh" class="ghost" type="button">同期する</button></div>
+    <input id="q" type="search" placeholder="銘柄・蔵元・メモで検索">
+    <div class="list-toolbar"><button id="l-archive" class="ghost" type="button">アーカイブ</button><button id="l-order" class="ghost" type="button">新しい順</button><button id="l-refresh" class="ghost" type="button">同期する</button><button id="l-trash" class="ghost" type="button" hidden>ごみ箱</button><button id="l-undo" class="ghost" type="button" hidden>直前の削除を戻す</button><button id="l-state-check" class="ghost" type="button" hidden>結果を確認</button></div>
     <div id="l-sync" class="note" role="status" aria-live="polite"></div>
+    <div id="l-state-availability" class="note" role="status" aria-live="polite" hidden></div>
+    <div id="l-action-msg" class="note" role="status" aria-live="polite"></div>
     <div id="l-count" class="sec"></div>
     <div id="l-items"></div>
     <div class="credit">さけのわデータを利用しています（<a href="https://sakenowa.com/" target="_blank" rel="noopener">sakenowa.com</a>）</div>
@@ -117,11 +120,12 @@
 <script src="js/config.js?v=1"></script>
 <script src="js/aroma.js?v=1"></script>
 <script src="js/data.js?v=2"></script>
-<script src="js/api.js?v=3"></script>
+<script src="js/api.js?v=6"></script>
 <script src="js/bg.js?v=2"></script>
 <script src="js/viewport.js?v=4"></script>
-<script src="js/record-cache.js?v=2"></script>
+<script src="js/record-cache.js?v=5"></script>
 <script src="js/scores.js?v=1"></script>
-<script src="js/app.js?v=7"></script>
+<script src="js/swipe.js?v=2"></script>
+<script src="js/app.js?v=10"></script>
 </body>
 </html>

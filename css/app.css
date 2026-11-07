@@ -72,6 +72,8 @@ summary::-webkit-details-marker{display:none}
 .rng input::-moz-range-thumb{width:var(--range-thumb-size);height:var(--range-thumb-size);border-radius:50%;border:2px solid var(--gold-d);background:var(--gold)}
 .rng .mk{position:absolute;bottom:1px;width:2px;height:8px;background:var(--petal);pointer-events:none}
 .prow .v{grid-area:value;text-align:right;font-size:20px;font-weight:500}
+.prow.score-kind{grid-template-columns:minmax(0,1fr) max-content auto}
+.prow .v.value-kind{font-size:16px;line-height:1.5;white-space:nowrap}
 .tag{grid-area:status;font-size:16px;min-width:44px;padding:4px 7px;text-align:center;border-radius:6px;white-space:nowrap;background:var(--line);color:var(--sub)}
 .tag.fix{background:var(--gold);color:var(--gold-d)}
 #v-res .sec{font-size:15px;margin-top:18px}
@@ -114,3 +116,24 @@ summary::-webkit-details-marker{display:none}
 .score-origin{font-size:16px;line-height:1.5;color:var(--sub);margin-top:4px;overflow-wrap:anywhere}
 .score-original{font-size:18px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;margin-top:6px}
 .score-edit{font-size:16px;min-height:44px}
+
+/* List actions; dimensions of the application viewport are unchanged. */
+.record-row{position:relative;border-radius:14px;overflow:hidden;margin-bottom:10px;background:#27313c}
+.record-surface{display:flex;position:relative;z-index:1;background:var(--card,#19212c);transition:transform .16s ease;touch-action:pan-y}
+.record-surface .li{flex:1;min-width:0;margin:0;border-radius:0}
+.row-menu{min-width:48px;border:0;background:transparent;color:inherit;font-size:14px;padding:8px}
+ .row-actions{position:absolute;inset:0;display:flex;justify-content:space-between}
+.row-actions[hidden],.row-left[hidden],.row-right[hidden]{display:none}
+.row-left,.row-right{display:flex;height:100%}.row-left{width:120px}.row-right{width:188px;margin-left:auto}
+.row-actions button{flex:1;min-width:44px;border:0;color:#fff;background:#304761;padding:8px;font-size:16px}
+.row-actions button[data-action=delete]{background:#703d47}
+.record-row.actions-left .record-surface{transform:translateX(120px)}
+.record-row.actions-right .record-surface{transform:translateX(-188px)}
+.record-row.actions-menu .row-actions{position:relative;min-height:52px}.record-row.actions-menu .row-left{height:auto}.record-row.actions-menu .row-right{height:auto}
+.row-actions button:disabled{opacity:.45}
+.record-row.reordering{outline:2px solid var(--gold);opacity:.8;z-index:5}.record-row.reordering .record-surface{transition:none}
+.list-group{font-size:16px;font-weight:600;padding:14px 2px 8px;color:var(--gold)}
+.detail-actions{display:flex;gap:12px;flex-wrap:wrap}
+.list-toolbar{flex-wrap:wrap;gap:8px}
+.row-menu:focus-visible,.row-actions button:focus-visible{outline:3px solid #e7bd77;outline-offset:-3px}
+@media(prefers-reduced-motion:reduce){.record-surface{transition:none}}

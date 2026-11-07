@@ -1,7 +1,7 @@
 (function () {
   'use strict';
   var DEFAULTS = { maxAgeMs: 30 * 86400000, maxRecords: 1000, maxSnapshotBytes: 5 * 1024 * 1024, maxTotalBytes: 10 * 1024 * 1024, maxThumbChars: 32768 };
-  var FIELDS = ['row','recordId','sourceSheetId','sourceVersion','date','brand','brewery','area','grade','method','rice','polish','place','memo','color','clarity','viscosity','aromaType','aromaDetail','ssi4','rating','brandId','bottleUrl','labelUrl','scale','updatedAt'];
+  var FIELDS = ['row','recordId','sourceSheetId','sourceVersion','date','brand','brewery','area','grade','method','rice','polish','place','memo','color','clarity','viscosity','aromaType','aromaDetail','ssi4','rating','brandId','bottleUrl','labelUrl','scale','updatedAt','deletedAt','pinned','recordKey','stateVersion','stateEligible','stateReason','stateMissingId','revisionFormat','revisionVersion','baseVersion','revisionEligible','revisionReason','revisionConflict','archived','sortOrder','createdAt','creationKnown'];
   var AXES = ['aroma','attack','sweet','acid','bitter','umami','body','finish'];
   function connection(scope) {
     if (!scope || !scope.endpoint || !scope.generation || !/^[A-Za-z0-9_-]+$/.test(scope.sourceSheetId || '')) throw new Error('端末保存の接続先を確認できません');
@@ -39,15 +39,18 @@
       }).then(function (entry) {
         if (!entry) return null;
         var age = now() - entry.savedAt;
-        if (entry.schema !== 1 || entry.key !== key(scope) || entry.connection !== connection(scope) || entry.sourceSheetId !== scope.sourceSheetId || !Number.isFinite(age) || age < 0 || age > limits.maxAgeMs) return backend.remove(key(scope)).then(function () { return null; });
+        if ([1,2,3,4].indexOf(entry.schema) < 0 || entry.key !== key(scope) || entry.connection !== connection(scope) || entry.sourceSheetId !== scope.sourceSheetId || !Number.isFinite(age) || age < 0 || age > limits.maxAgeMs) return backend.remove(key(scope)).then(function () { return null; });
         if (!Array.isArray(entry.records) || entry.records.length > limits.maxRecords) throw new Error('端末保存データの形式を確認できません');
+        entry.recordStateFormat = entry.schema === 4 && entry.recordStateFormat === 'state-v3' ? 'state-v3' : '';
+        entry.recordStateEnabled = entry.recordStateFormat === 'state-v3' && entry.recordStateEnabled === true;
         entry.records = entry.records.map(function (r) { return clean(r, scope.sourceSheetId); });
+        entry.requiresRefresh = entry.schema !== 4 || entry.records.some(function (r) { return r.scoreFormat !== 'preserve-v1' || r.revisionFormat !== 'revision-v1'; });
         return entry;
       }); },
       write: function (scope, response) { return Promise.resolve().then(function () {
         var cacheKey = key(scope);
         if (!response || response.sourceSheetId !== scope.sourceSheetId || !Array.isArray(response.records) || response.records.length > limits.maxRecords) throw new Error('端末保存の件数または接続先を確認してください');
-        var entry = { schema: 1, key: cacheKey, connection: connection(scope), sourceSheetId: scope.sourceSheetId, savedAt: now(), records: response.records.map(function (r) { return clean(r, scope.sourceSheetId); }) };
+        var entry = { schema: response.recordStateFormat === 'state-v3' ? 4 : 1, recordStateFormat: response.recordStateFormat === 'state-v3' ? 'state-v3' : '', recordStateEnabled: response.recordStateFormat === 'state-v3' && response.recordStateEnabled === true, key: cacheKey, connection: connection(scope), sourceSheetId: scope.sourceSheetId, savedAt: now(), records: response.records.map(function (r) { return clean(r, scope.sourceSheetId); }) };
         entry.bytes = bytes(entry) + 32;
         if (entry.bytes > limits.maxSnapshotBytes) { entry.records.forEach(function (r) { r.thumb = ''; }); entry.bytes = bytes(entry) + 32; }
         if (entry.bytes > limits.maxSnapshotBytes) throw new Error('端末保存の容量上限を超えています。通信表示を続けます');
